@@ -1,5 +1,5 @@
 // PadeLMQ — Voorraad- & locatie-gestuurde prijzen (één-bestand Node-app, geen build/deps).
-// Zet product-prijs + verzendprofiel automatisch o.b.v. voorraad per locatie.
+// Zet product-prijs + verzendprofiel + markt-beschikbaarheid automatisch o.b.v. voorraad per locatie.
 // Regels worden bewaard als Shopify-metafields op het product zelf (geen database).
 
 const http = require("http");
@@ -7,7 +7,7 @@ const http = require("http");
 // ---------- Config ----------
 const SHOP = process.env.SHOPIFY_SHOP || "";
 const TOKEN = process.env.SHOPIFY_ADMIN_TOKEN || "";
-const API_VERSION = process.env.SHOPIFY_API_VERSION || "2025-01";
+const API_VERSION = process.env.SHOPIFY_API_VERSION || "2026-01";
 const CRON_SECRET = process.env.CRON_SECRET || "";
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || "";
 const INTERVAL_MIN = parseInt(process.env.RECONCILE_INTERVAL_MINUTES || "", 10);
@@ -25,11 +25,18 @@ const PROFILES = {
   algemeen: "gid://shopify/DeliveryProfile/118956327261",   // gratis vanaf €100
   ballendozen: "gid://shopify/DeliveryProfile/149705458013", // doostoeslag
 };
+// Europa-markt = alle landen buiten BE/NL. Aparte prijslijst + publicatie (etalage).
+const EUROPA = {
+  publication: "gid://shopify/Publication/308914913629", // beschikbaarheid (etalage)
+  pricelist: "gid://shopify/PriceList/32979026269",      // aparte prijs voor Europa (EUR)
+};
 const MANAGED_TAG = "auto-stock-price";
 const NS = "stockprice";
 const MF = {
   enabled: "enabled", priceA: "price_a", priceB: "price_b",
-  marketSurcharge: "market_surcharge", locked: "locked", state: "state", log: "log",
+  marketSurcharge: "market_surcharge", // opslag op Prijs B voor Europa (normaal, Spanje-voorraad)
+  euBePrice: "eu_be_price",             // Europa-prijs als ENKEL BE-voorraad; leeg = uitverkocht buiten BE/NL
+  locked: "locked", state: "state", euState: "eu_state", log: "log",
 };
 
 // ---------- Shopify Admin API ----------
@@ -82,6 +89,27 @@ async function setProfile(profileId, variantId) {
   if (e.length) throw new Error("profiel: " + JSON.stringify(e));
 }
 
+// Europa: vaste prijs zetten in de Europa-prijslijst
+async function setEuropaPrice(variantId, amount) {
+  const d = await gql(
+    `mutation($id:ID!,$prices:[PriceListPriceInput!]!){priceListFixedPricesAdd(priceListId:$id,prices:$prices){userErrors{message}}}`,
+    { id: EUROPA.pricelist, prices: [{ variantId, price: { amount: String(amount), currencyCode: "EUR" } }] }
+  );
+  const e = d.priceListFixedPricesAdd.userErrors;
+  if (e.length) throw new Error("europa-prijs: " + JSON.stringify(e));
+}
+
+// Europa: product in of uit de etalage (publicatie) zetten
+async function setEuropaPublish(productId, publish) {
+  const input = publish ? { publishablesToAdd: [productId] } : { publishablesToRemove: [productId] };
+  const d = await gql(
+    `mutation($id:ID!,$in:PublicationUpdateInput!){publicationUpdate(id:$id,input:$in){userErrors{message}}}`,
+    { id: EUROPA.publication, in: input }
+  );
+  const e = d.publicationUpdate.userErrors;
+  if (e.length) throw new Error("europa-etalage: " + JSON.stringify(e));
+}
+
 async function setMeta(productId, fields) {
   const metafields = Object.entries(fields).map(([key, value]) => ({
     ownerId: productId, namespace: NS, key, type: "single_line_text_field", value: String(value),
@@ -115,6 +143,22 @@ function decideState(be, es) {
   if (es > 0) return "stock-es";
   return "stock-leeg";
 }
+function num(v) { const n = parseFloat(String(v).replace(",", ".")); return isNaN(n) ? null : n; }
+
+// Bepaal wat er buiten BE/NL (Europa) moet gebeuren.
+// - Spanje voorraad  -> koopbaar aan Prijs B (+ opslag)
+// - enkel BE-voorraad -> uitverkocht, TENZIJ eu_be_price is ingevuld (dan koopbaar aan die hogere prijs)
+// - niets            -> uitverkocht
+function decideEuropa(be, es, priceB, surcharge, euBePrice) {
+  if (es > 0) {
+    const p = (num(priceB) ?? 0) + (num(surcharge) ?? 0);
+    return { on: true, price: p.toFixed(2) };
+  }
+  if (be > 0 && num(euBePrice) != null) {
+    return { on: true, price: num(euBePrice).toFixed(2) };
+  }
+  return { on: false, price: null };
+}
 
 async function reconcileAll() {
   const products = await fetchManaged();
@@ -128,30 +172,49 @@ async function reconcileAll() {
     const priceA = cfg[MF.priceA];
     const priceB = cfg[MF.priceB];
     const prev = cfg[MF.state] || "";
+    const prevEu = cfg[MF.euState] || "";
     const be = availableAt(variant, LOCATIONS.belgium);
     const es = availableAt(variant, LOCATIONS.spain);
     const target = decideState(be, es);
-    const base = { title: p.title, be, es, from: prev || "(onbekend)", to: target, action: "", applied: false };
+    const eu = decideEuropa(be, es, priceB, cfg[MF.marketSurcharge], cfg[MF.euBePrice]);
+    const euDesired = eu.on ? `on:${eu.price}` : "off";
+    const base = { title: p.title, be, es, from: prev || "(onbekend)", to: target, eu: euDesired, action: "", applied: false };
 
     if (!enabled) { results.push({ ...base, action: "overgeslagen (uit)" }); continue; }
     if (locked) { results.push({ ...base, action: "overgeslagen (vergrendeld)" }); continue; }
     if (target === "stock-be" && !priceA) { results.push({ ...base, action: "overgeslagen (Prijs A ontbreekt)" }); continue; }
     if (target === "stock-es" && !priceB) { results.push({ ...base, action: "overgeslagen (Prijs B ontbreekt)" }); continue; }
-    if (target === prev) { results.push({ ...base, action: "geen wissel" }); continue; }
 
+    const beNlChanged = target !== prev;
+    const euChanged = euDesired !== prevEu;
+    if (!beNlChanged && !euChanged) { results.push({ ...base, action: "geen wissel" }); continue; }
+
+    // BE/NL prijs + verzendprofiel
     let price = null, profile = null;
     if (target === "stock-be") { price = priceA; profile = PROFILES.algemeen; }
     else if (target === "stock-es") { price = priceB; profile = PROFILES.ballendozen; }
 
-    const action = target === "stock-leeg"
-      ? "toestand -> leeg (uitverkocht), prijs ongewijzigd"
-      : `prijs -> ${price}, profiel -> ${target === "stock-be" ? "Algemeen" : "Ballendozen"}`;
+    const parts = [];
+    if (beNlChanged) parts.push(target === "stock-leeg"
+      ? "BE/NL -> uitverkocht (prijs ongewijzigd)"
+      : `BE/NL prijs -> ${price}, profiel -> ${target === "stock-be" ? "Algemeen" : "Ballendozen"}`);
+    if (euChanged) parts.push(eu.on
+      ? `Europa -> koopbaar aan ${eu.price}`
+      : "Europa -> uitverkocht (verborgen)");
+    const action = parts.join(" | ");
 
     if (!APPLY) { results.push({ ...base, action: "[DRY-RUN] " + action }); continue; }
     try {
-      if (price) await setPrice(p.id, variant.id, price);
-      if (profile) await setProfile(profile, variant.id);
-      await setMeta(p.id, { [MF.state]: target, [MF.log]: `${new Date().toISOString()} ${prev || "?"}->${target} BE=${be} ES=${es}` });
+      if (beNlChanged && price) await setPrice(p.id, variant.id, price);
+      if (beNlChanged && profile) await setProfile(profile, variant.id);
+      if (euChanged) {
+        if (eu.on) { await setEuropaPrice(variant.id, eu.price); await setEuropaPublish(p.id, true); }
+        else { await setEuropaPublish(p.id, false); }
+      }
+      await setMeta(p.id, {
+        [MF.state]: target, [MF.euState]: euDesired,
+        [MF.log]: `${new Date().toISOString()} ${prev || "?"}->${target} eu:${euDesired} BE=${be} ES=${es}`,
+      });
       results.push({ ...base, action, applied: true });
     } catch (err) { results.push({ ...base, action: "FOUT: " + err.message }); }
   }
@@ -178,7 +241,8 @@ const server = http.createServer(async (req, res) => {
         return { id: p.id, title: p.title, currentPrice: v?.price ?? "",
           enabled: (c[MF.enabled] ?? "true") !== "false", locked: c[MF.locked] === "true",
           priceA: c[MF.priceA] ?? "", priceB: c[MF.priceB] ?? "",
-          marketSurcharge: c[MF.marketSurcharge] ?? "", state: c[MF.state] ?? "" };
+          marketSurcharge: c[MF.marketSurcharge] ?? "", euBePrice: c[MF.euBePrice] ?? "",
+          state: c[MF.state] ?? "", euState: c[MF.euState] ?? "" };
       });
       return send(res, 200, { ok: true, rows });
     }
@@ -191,8 +255,8 @@ const server = http.createServer(async (req, res) => {
           const b = JSON.parse(body || "{}");
           if (!b.id) throw new Error("id ontbreekt");
           await setMeta(b.id, { [MF.priceA]: b.priceA ?? "", [MF.priceB]: b.priceB ?? "",
-            [MF.marketSurcharge]: b.marketSurcharge ?? "", [MF.enabled]: b.enabled ? "true" : "false",
-            [MF.locked]: b.locked ? "true" : "false" });
+            [MF.marketSurcharge]: b.marketSurcharge ?? "", [MF.euBePrice]: b.euBePrice ?? "",
+            [MF.enabled]: b.enabled ? "true" : "false", [MF.locked]: b.locked ? "true" : "false" });
           send(res, 200, { ok: true });
         } catch (e) { send(res, 500, { ok: false, error: e.message }); }
       });
@@ -232,10 +296,10 @@ server.listen(PORT, () => {
 const PAGE = `<!doctype html><html lang="nl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>PadeLMQ Voorraadprijzen</title>
 <style>body{font-family:system-ui,sans-serif;background:#f6f7f9;color:#1a1a1a;margin:0}
-.wrap{max-width:1080px;margin:24px auto;padding:0 16px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px}
-input{padding:6px 8px;border:1px solid #d1d5db;border-radius:6px}input.num{width:90px}
+.wrap{max-width:1180px;margin:24px auto;padding:0 16px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px}
+input{padding:6px 8px;border:1px solid #d1d5db;border-radius:6px}input.num{width:84px}
 button{padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:#fff;cursor:pointer}
-table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:10px;text-align:left}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:9px;text-align:left}
 thead tr{background:#f3f4f6}tbody tr{border-top:1px solid #eee}.muted{color:#6b7280}</style></head>
 <body><div class="wrap" id="app"></div>
 <script>
@@ -248,9 +312,9 @@ async function save(i){const r=window._rows[i];const res=await fetch("/api/produ
 async function runCheck(){msg("Bezig met controleren…");const res=await fetch("/api/reconcile?secret="+encodeURIComponent(PW));const j=await res.json();if(!j.ok){msg("Fout: "+j.error);return;}msg("Check klaar — "+j.total+" producten, "+j.applied+" toegepast"+(j.apply?"":" (DRY-RUN: niets echt gewijzigd)"));}
 function msg(t){document.getElementById("msg").textContent=t;}
 function upd(i,k,v){window._rows[i][k]=v;}
-function render(rows){window._rows=rows;let h='<div style="display:flex;gap:12px;align-items:center;margin-bottom:16px"><h2 style="margin:0">PadeLMQ — Voorraadprijzen</h2><button onclick="runCheck()">Nu controleren</button><span class="muted" id="msg"></span></div><p class="muted">Producten met tag <code>auto-stock-price</code>. Prijs A = eigen BE-voorraad (gratis verz.). Prijs B = dropship (toeslag). Vergrendeld = app raakt prijs niet aan.</p><div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th>Product</th><th>Shop nu</th><th>Prijs A</th><th>Prijs B</th><th>Opslag buiten BE/NL</th><th>Aan</th><th>Vergrendeld</th><th>Toestand</th><th></th></tr></thead><tbody>';
-if(!rows.length)h+='<tr><td colspan="9" class="muted" style="padding:16px">Nog geen producten met de tag <code>auto-stock-price</code>.</td></tr>';
-rows.forEach((r,i)=>{h+='<tr><td>'+r.title+'</td><td>€ '+r.currentPrice+'</td><td><input class="num" value="'+r.priceA+'" oninput="upd('+i+',\\'priceA\\',this.value)"></td><td><input class="num" value="'+r.priceB+'" oninput="upd('+i+',\\'priceB\\',this.value)"></td><td><input class="num" value="'+r.marketSurcharge+'" oninput="upd('+i+',\\'marketSurcharge\\',this.value)"></td><td><input type="checkbox" '+(r.enabled?"checked":"")+' onchange="upd('+i+',\\'enabled\\',this.checked)"></td><td><input type="checkbox" '+(r.locked?"checked":"")+' onchange="upd('+i+',\\'locked\\',this.checked)"></td><td class="muted">'+(r.state||"—")+'</td><td><button style="background:#111827" onclick="save('+i+')">Opslaan</button></td></tr>';});
+function render(rows){window._rows=rows;let h='<div style="display:flex;gap:12px;align-items:center;margin-bottom:16px"><h2 style="margin:0">PadeLMQ — Voorraadprijzen</h2><button onclick="runCheck()">Nu controleren</button><span class="muted" id="msg"></span></div><p class="muted">Producten met tag <code>auto-stock-price</code>. Prijs A = eigen BE-voorraad (gratis verz.). Prijs B = dropship. Opslag = extra op Prijs B voor buiten BE/NL. Buiten-BE/NL-prijs = prijs als enkel BE-voorraad (leeg = daar uitverkocht). Vergrendeld = app raakt product niet aan.</p><div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th>Product</th><th>Shop nu</th><th>Prijs A</th><th>Prijs B</th><th>Opslag buiten BE/NL</th><th>Buiten-BE/NL-prijs</th><th>Aan</th><th>Vergr.</th><th>Toestand</th><th>Europa</th><th></th></tr></thead><tbody>';
+if(!rows.length)h+='<tr><td colspan="11" class="muted" style="padding:16px">Nog geen producten met de tag <code>auto-stock-price</code>.</td></tr>';
+rows.forEach((r,i)=>{h+='<tr><td>'+r.title+'</td><td>€ '+r.currentPrice+'</td><td><input class="num" value="'+r.priceA+'" oninput="upd('+i+',\\'priceA\\',this.value)"></td><td><input class="num" value="'+r.priceB+'" oninput="upd('+i+',\\'priceB\\',this.value)"></td><td><input class="num" value="'+r.marketSurcharge+'" oninput="upd('+i+',\\'marketSurcharge\\',this.value)"></td><td><input class="num" value="'+r.euBePrice+'" oninput="upd('+i+',\\'euBePrice\\',this.value)"></td><td><input type="checkbox" '+(r.enabled?"checked":"")+' onchange="upd('+i+',\\'enabled\\',this.checked)"></td><td><input type="checkbox" '+(r.locked?"checked":"")+' onchange="upd('+i+',\\'locked\\',this.checked)"></td><td class="muted">'+(r.state||"—")+'</td><td class="muted">'+(r.euState||"—")+'</td><td><button style="background:#111827" onclick="save('+i+')">Opslaan</button></td></tr>';});
 h+='</tbody></table></div>';app.innerHTML=h;}
 login();
 </script></body></html>`;
