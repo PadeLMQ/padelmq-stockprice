@@ -1,0 +1,12 @@
+{
+  "name": "padelmq-stockprice",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PadeLMQ voorraad- & locatie-gestuurde prijzen",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
