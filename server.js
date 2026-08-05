@@ -176,15 +176,31 @@ async function setEuropaPublish(productId, publish) {
 }
 
 async function setMeta(productId, fields) {
-  const metafields = Object.entries(fields).map(([key, value]) => ({
-    ownerId: productId, namespace: NS, key, type: "single_line_text_field", value: String(value),
-  }));
-  const d = await gql(
-    `mutation($m:[MetafieldsSetInput!]!){metafieldsSet(metafields:$m){userErrors{message}}}`,
-    { m: metafields }
-  );
-  const e = d.metafieldsSet.userErrors;
-  if (e.length) throw new Error("metafields: " + JSON.stringify(e));
+  // Shopify weigert lege metafield-waarden ("Value can't be blank"). Daarom:
+  // niet-lege waarden -> metafieldsSet; lege waarden -> metafieldsDelete (veld wissen).
+  const entries = Object.entries(fields);
+  const toSet = entries.filter(([, v]) => String(v ?? "").trim() !== "");
+  const toDel = entries.filter(([, v]) => String(v ?? "").trim() === "");
+  if (toSet.length) {
+    const metafields = toSet.map(([key, value]) => ({
+      ownerId: productId, namespace: NS, key, type: "single_line_text_field", value: String(value),
+    }));
+    const d = await gql(
+      `mutation($m:[MetafieldsSetInput!]!){metafieldsSet(metafields:$m){userErrors{message}}}`,
+      { m: metafields }
+    );
+    const e = d.metafieldsSet.userErrors;
+    if (e.length) throw new Error("metafields: " + JSON.stringify(e));
+  }
+  if (toDel.length) {
+    const ids = toDel.map(([key]) => ({ ownerId: productId, namespace: NS, key }));
+    const d = await gql(
+      `mutation($m:[MetafieldIdentifierInput!]!){metafieldsDelete(metafields:$m){deletedMetafields{key} userErrors{message}}}`,
+      { m: ids }
+    );
+    const e = d.metafieldsDelete.userErrors;
+    if (e.length) throw new Error("metafields-del: " + JSON.stringify(e));
+  }
 }
 
 // ---------- Kernlogica ----------
