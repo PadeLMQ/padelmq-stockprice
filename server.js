@@ -234,6 +234,61 @@ async function reconcileAll() {
   return results;
 }
 
+// ---------- Express-motor (Spanje-voorraad -> DHL Express aan/uit via tag) ----------
+// Regel (door Mathias bevestigd): express beschikbaar zodra het product in Spanje op voorraad is,
+// ongeacht BE-voorraad. Lever: tag "hide_express_be_nl" AANWEZIG = express verborgen in BE/NL.
+// Dus: Spanje-voorraad > 0 -> tag weg (express aan); Spanje = 0 -> tag erbij (express uit).
+const EXPRESS_TAG = "hide_express_be_nl";
+const EXPRESS_SCOPE_TAG = "stock_spain"; // enkel producten die uit Spanje (kunnen) komen
+const SPAIN_LOC = LOCATIONS.spain[0];
+
+async function tagAdd(productId, tag) {
+  const d = await gql(`mutation($id:ID!,$t:[String!]!){tagsAdd(id:$id,tags:$t){userErrors{message}}}`, { id: productId, t: [tag] });
+  const e = d.tagsAdd.userErrors; if (e.length) throw new Error("tagsAdd: " + JSON.stringify(e));
+}
+async function tagRemove(productId, tag) {
+  const d = await gql(`mutation($id:ID!,$t:[String!]!){tagsRemove(id:$id,tags:$t){userErrors{message}}}`, { id: productId, t: [tag] });
+  const e = d.tagsRemove.userErrors; if (e.length) throw new Error("tagsRemove: " + JSON.stringify(e));
+}
+function spainQty(node) {
+  let t = 0;
+  for (const v of (node.variants?.edges || [])) {
+    for (const e of (v.node.inventoryItem?.inventoryLevels?.edges || [])) {
+      if (e.node.location.id === SPAIN_LOC) {
+        const q = (e.node.quantities || []).find((x) => x.name === "available");
+        t += q?.quantity ?? 0;
+      }
+    }
+  }
+  return t;
+}
+async function reconcileExpress() {
+  const query = `query M($q:String!,$after:String){products(first:50,query:$q,after:$after){
+    pageInfo{hasNextPage endCursor}
+    edges{node{ id title tags
+      variants(first:25){edges{node{ inventoryItem{inventoryLevels(first:20){edges{node{location{id} quantities(names:["available"]){name quantity}}}}} }}}
+    }}}}`;
+  const out = { total: 0, changed: 0, added: 0, removed: 0, errors: [] };
+  let after = null;
+  do {
+    const d = await gql(query, { q: `tag:'${EXPRESS_SCOPE_TAG}'`, after });
+    for (const e of d.products.edges) {
+      const n = e.node; out.total++;
+      const wantHide = spainQty(n) <= 0;          // geen Spanje-voorraad -> express verbergen
+      const hasTag = n.tags.includes(EXPRESS_TAG);
+      if (wantHide === hasTag) continue;           // al correct, niets doen
+      if (!APPLY) { out.changed++; continue; }
+      try {
+        if (wantHide) { await tagAdd(n.id, EXPRESS_TAG); out.added++; }
+        else { await tagRemove(n.id, EXPRESS_TAG); out.removed++; }
+        out.changed++;
+      } catch (err) { out.errors.push(n.title + ": " + err.message); }
+    }
+    after = d.products.pageInfo.hasNextPage ? d.products.pageInfo.endCursor : null;
+  } while (after);
+  return out;
+}
+
 // ---------- HTTP ----------
 function send(res, code, data, type = "application/json") {
   res.writeHead(code, { "Content-Type": type });
@@ -288,6 +343,13 @@ const server = http.createServer(async (req, res) => {
         applied: results.filter((r) => r.applied).length, results });
     }
 
+    if (url.pathname === "/api/express") {
+      const provided = url.searchParams.get("secret") || req.headers["x-cron-secret"];
+      if (CRON_SECRET && provided !== CRON_SECRET) return send(res, 401, { ok: false, error: "unauthorized" });
+      const r = await reconcileExpress();
+      return send(res, 200, { ok: true, apply: APPLY, ...r });
+    }
+
     send(res, 404, { ok: false, error: "not found" });
   } catch (e) { send(res, 500, { ok: false, error: e.message }); }
 });
@@ -304,6 +366,17 @@ server.listen(PORT, () => {
     setTimeout(run, 15000);
     setInterval(run, INTERVAL_MIN * 60000);
     console.log(`[stockprice] scheduler: elke ${INTERVAL_MIN} min`);
+    // Express-motor draait op een tragere cadans (hele catalogus met stock_spain), min. 60 min.
+    const expressEvery = Math.max(INTERVAL_MIN, 60);
+    const runExpress = async () => {
+      try {
+        const r = await reconcileExpress();
+        console.log(`[express] ${r.total} producten, ${r.changed} gewijzigd (+${r.added}/-${r.removed})${APPLY ? "" : " (DRY-RUN)"}`);
+      } catch (e) { console.error("[express] fout:", e.message); }
+    };
+    setTimeout(runExpress, 45000);
+    setInterval(runExpress, expressEvery * 60000);
+    console.log(`[express] scheduler: elke ${expressEvery} min`);
   } else {
     console.log("[stockprice] scheduler uit (RECONCILE_INTERVAL_MINUTES niet gezet)");
   }
