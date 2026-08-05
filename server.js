@@ -241,8 +241,9 @@ function decideEuropa(be, es, priceB, surcharge, euBePrice) {
   return { on: false, price: null };
 }
 
-async function reconcileAll() {
-  const products = await fetchManaged();
+async function reconcileAll(onlyId = null) {
+  let products = await fetchManaged();
+  if (onlyId) products = products.filter((p) => p.id === onlyId); // enkel dit product (bv. na opslaan in dashboard)
   const results = [];
   for (const p of products) {
     const cfg = mfMap(p);
@@ -426,7 +427,14 @@ const server = http.createServer(async (req, res) => {
             [MF.competitor]: b.competitor ?? "", [MF.competitorShip]: b.competitorShip ?? "",
             [MF.cost]: b.cost ?? "",
             [MF.enabled]: b.enabled ? "true" : "false", [MF.locked]: b.locked ? "true" : "false" });
-          send(res, 200, { ok: true });
+          // Meteen toepassen in Shopify voor DIT product (prijs + profiel voor de huidige voorraadtoestand).
+          let applied = 0, note = "";
+          try {
+            const rr = await reconcileAll(b.id);
+            applied = rr.filter((x) => x.applied).length;
+            note = (rr[0] && rr[0].action) || "";
+          } catch (e2) { note = "opgeslagen, maar toepassen faalde: " + e2.message; }
+          send(res, 200, { ok: true, applied, note, apply: APPLY });
         } catch (e) { send(res, 500, { ok: false, error: e.message }); }
       });
       return;
@@ -434,7 +442,7 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/reconcile") {
       const provided = url.searchParams.get("secret") || req.headers["x-cron-secret"];
-      if (CRON_SECRET && provided !== CRON_SECRET) return send(res, 401, { ok: false, error: "unauthorized" });
+      if (CRON_SECRET && provided !== CRON_SECRET && !checkPw(url)) return send(res, 401, { ok: false, error: "unauthorized" });
       const results = await reconcileAll();
       return send(res, 200, { ok: true, apply: APPLY, total: results.length,
         applied: results.filter((r) => r.applied).length, results });
@@ -442,14 +450,14 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/api/express") {
       const provided = url.searchParams.get("secret") || req.headers["x-cron-secret"];
-      if (CRON_SECRET && provided !== CRON_SECRET) return send(res, 401, { ok: false, error: "unauthorized" });
+      if (CRON_SECRET && provided !== CRON_SECRET && !checkPw(url)) return send(res, 401, { ok: false, error: "unauthorized" });
       const r = await reconcileExpress();
       return send(res, 200, { ok: true, apply: APPLY, ...r });
     }
 
     if (url.pathname === "/api/tienda") {
       const provided = url.searchParams.get("secret") || req.headers["x-cron-secret"];
-      if (CRON_SECRET && provided !== CRON_SECRET) return send(res, 401, { ok: false, error: "unauthorized" });
+      if (CRON_SECRET && provided !== CRON_SECRET && !checkPw(url)) return send(res, 401, { ok: false, error: "unauthorized" });
       const r = await reconcileTienda();
       return send(res, 200, { ok: true, apply: APPLY, ...r });
     }
@@ -581,8 +589,19 @@ const eur=v=>v?("\\u20ac "+v):"—";
 function login(){app.innerHTML='<div class="login"><h1>PadeLMQ — Voorraadprijzen</h1><p class="sub">Voer je cijfercode in</p><input id="pw" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="12" placeholder="cijfercode" style="width:100%;font-size:20px;letter-spacing:4px;text-align:center"><br><br><button onclick="doLogin()" style="width:100%">Openen</button><p id="err" style="color:#b91c1c"></p></div>';var el=document.getElementById("pw");el.focus();el.addEventListener("input",function(){this.value=this.value.replace(/[^0-9]/g,"");});el.addEventListener("keydown",e=>{if(e.key==="Enter")doLogin()});}
 async function doLogin(){PW=document.getElementById("pw").value;const r=await fetch("/api/products?pw="+encodeURIComponent(PW));const j=await r.json();if(!j.ok){document.getElementById("err").textContent="Fout: "+(j.error||"");return;}render(j.rows);}
 async function reload(){const r=await fetch("/api/products?pw="+encodeURIComponent(PW));const j=await r.json();if(j.ok)render(j.rows);}
-async function save(i){const r=window._rows[i];const res=await fetch("/api/products?pw="+encodeURIComponent(PW),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(r)});const j=await res.json();msg(j.ok?("Opgeslagen: "+r.title):("Fout: "+j.error));}
-async function runCheck(){msg("Bezig met controleren\\u2026");const res=await fetch("/api/reconcile?secret="+encodeURIComponent(PW));const j=await res.json();if(!j.ok){msg("Fout: "+j.error);return;}msg("Check klaar \\u2014 "+j.total+" producten, "+j.applied+" toegepast"+(j.apply?"":" (TESTMODUS: niets echt gewijzigd)"));}
+async function save(i){
+ var b=document.getElementById("sv"+i); var old=b?b.textContent:""; if(b){b.textContent="Bezig\\u2026";b.disabled=true;}
+ var r=window._rows[i];
+ try{
+  var res=await fetch("/api/products?pw="+encodeURIComponent(PW),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(r)});
+  var j=await res.json();
+  if(!j.ok){ if(b){b.textContent=old;b.disabled=false;} msg("Fout bij opslaan: "+j.error); return; }
+  var toe = j.applied>0 ? "toegepast in Shopify" : "bewaard (past toe zodra de voorraad die prijs gebruikt)";
+  if(b){b.textContent="Opgeslagen \\u2713";b.style.background="#15803d";setTimeout(function(){b.textContent=old;b.disabled=false;b.style.background="";},2500);}
+  msg("Opgeslagen: "+r.title+" \\u2014 "+toe);
+ }catch(e){ if(b){b.textContent=old;b.disabled=false;} msg("Fout: "+e.message); }
+}
+async function runCheck(){msg("Bezig met controleren\\u2026");const res=await fetch("/api/reconcile?pw="+encodeURIComponent(PW));const j=await res.json();if(!j.ok){msg("Fout: "+j.error);return;}msg("Check klaar \\u2014 "+j.total+" producten, "+j.applied+" toegepast in Shopify"+(j.apply?"":" (TESTMODUS: niets echt gewijzigd)"));}
 function msg(t){var m=document.getElementById("msg");if(m)m.textContent=t;}
 function upd(i,k,v){window._rows[i][k]=v;}
 function setTab(t){TAB=t;render(window._rows);}
@@ -658,7 +677,7 @@ function renderBallen(rows){
     +'<div class="foot"><div class="toggles">'
      +'<label><input type="checkbox" '+(r.enabled?"checked":"")+' onchange="upd('+i+',\\'enabled\\',this.checked)"> App beheert deze doos</label>'
      +'<label><input type="checkbox" '+(r.locked?"checked":"")+' onchange="upd('+i+',\\'locked\\',this.checked)"> Vergrendeld (met rust laten)</label>'
-    +'</div><button class="dark" onclick="save('+i+')">Opslaan</button></div>'
+    +'</div><button class="dark" id="sv'+i+'" onclick="save('+i+')">Opslaan</button></div>'
    +'</div>'
   +'</div>';
  });
