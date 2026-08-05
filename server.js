@@ -295,26 +295,100 @@ server.listen(PORT, () => {
 // ---------- Dashboard (HTML) ----------
 const PAGE = `<!doctype html><html lang="nl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>PadeLMQ Voorraadprijzen</title>
-<style>body{font-family:system-ui,sans-serif;background:#f6f7f9;color:#1a1a1a;margin:0}
-.wrap{max-width:1180px;margin:24px auto;padding:0 16px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px}
-input{padding:6px 8px;border:1px solid #d1d5db;border-radius:6px}input.num{width:84px}
-button{padding:8px 14px;border:none;border-radius:8px;background:#0f766e;color:#fff;cursor:pointer}
-table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:9px;text-align:left}
-thead tr{background:#f3f4f6}tbody tr{border-top:1px solid #eee}.muted{color:#6b7280}</style></head>
+<style>
+:root{--groen:#0f766e;--groen2:#0b6e4f;--rand:#e5e7eb;--grijs:#6b7280;--bg:#f6f7f9}
+*{box-sizing:border-box}body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:#111827;margin:0}
+.wrap{max-width:1240px;margin:0 auto;padding:20px 16px 60px}
+.top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+h1{font-size:22px;margin:0;font-weight:700}
+.sub{color:var(--grijs);font-size:13px;margin:2px 0 16px}
+button{padding:8px 14px;border:none;border-radius:8px;background:var(--groen);color:#fff;cursor:pointer;font-size:14px}
+button.ghost{background:#fff;color:#111827;border:1px solid var(--rand)}
+button.dark{background:#111827}
+.msg{color:var(--grijs);font-size:13px}
+.tabs{display:flex;gap:6px;border-bottom:1px solid var(--rand);margin:8px 0 0}
+.tab{padding:10px 16px;border:none;background:none;color:var(--grijs);font-size:14px;font-weight:600;cursor:pointer;border-bottom:2px solid transparent;border-radius:0}
+.tab.on{color:var(--groen);border-bottom:2px solid var(--groen)}
+.panel{background:#fff;border:1px solid var(--rand);border-top:none;border-radius:0 0 12px 12px;overflow:hidden}
+.note{background:#f0fdfa;border:1px solid #99f6e4;color:#115e59;font-size:13px;padding:10px 14px;border-radius:10px;margin:14px 0}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:10px 12px;text-align:left;white-space:nowrap}
+thead tr{background:#f9fafb;color:#374151}th{font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+tbody tr{border-top:1px solid #f1f1f1}tbody tr:hover{background:#fafafa}
+td.prod{white-space:normal;max-width:280px;font-weight:600}
+input{padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:14px}input.num{width:88px}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#f3f4f6;color:#374151}
+.pill.be{background:#dcfce7;color:#166534}.pill.es{background:#fef9c3;color:#854d0e}.pill.leeg{background:#fee2e2;color:#991b1b}
+.pill.euon{background:#dbeafe;color:#1e40af}.pill.euoff{background:#f3f4f6;color:#6b7280}
+.hint{color:var(--grijs);font-size:12px}
+.advies{background:#fffbeb;border:1px solid #fde68a;border-radius:10px;padding:12px 16px;margin:0 0 14px}
+.advies-t{font-weight:700;color:#92400e;font-size:14px;margin-bottom:4px}
+.advies p{margin:6px 0;font-size:13px;line-height:1.5;color:#3f3f46}
+.login{max-width:360px;margin:14vh auto;background:#fff;border:1px solid var(--rand);border-radius:12px;padding:22px}
+</style></head>
 <body><div class="wrap" id="app"></div>
 <script>
-let PW="";
+let PW="", TAB="ballen";
 const app=document.getElementById("app");
-function login(){app.innerHTML='<div class="card" style="max-width:360px;margin:12vh auto"><h2>PadeLMQ — Voorraadprijzen</h2><p class="muted">Dashboard-wachtwoord</p><input id="pw" type="password" style="width:100%"><br><br><button onclick="doLogin()">Openen</button><p id="err" style="color:#b91c1c"></p></div>';document.getElementById("pw").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin()});}
+const eur=v=>v?("\\u20ac "+v):"—";
+
+function login(){app.innerHTML='<div class="login"><h1>PadeLMQ — Voorraadprijzen</h1><p class="sub">Voer je cijfercode in</p><input id="pw" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="12" placeholder="cijfercode" style="width:100%;font-size:20px;letter-spacing:4px;text-align:center"><br><br><button onclick="doLogin()" style="width:100%">Openen</button><p id="err" style="color:#b91c1c"></p></div>';var el=document.getElementById("pw");el.focus();el.addEventListener("input",function(){this.value=this.value.replace(/[^0-9]/g,"");});el.addEventListener("keydown",e=>{if(e.key==="Enter")doLogin()});}
 async function doLogin(){PW=document.getElementById("pw").value;const r=await fetch("/api/products?pw="+encodeURIComponent(PW));const j=await r.json();if(!j.ok){document.getElementById("err").textContent="Fout: "+(j.error||"");return;}render(j.rows);}
 async function reload(){const r=await fetch("/api/products?pw="+encodeURIComponent(PW));const j=await r.json();if(j.ok)render(j.rows);}
 async function save(i){const r=window._rows[i];const res=await fetch("/api/products?pw="+encodeURIComponent(PW),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(r)});const j=await res.json();msg(j.ok?("Opgeslagen: "+r.title):("Fout: "+j.error));}
-async function runCheck(){msg("Bezig met controleren…");const res=await fetch("/api/reconcile?secret="+encodeURIComponent(PW));const j=await res.json();if(!j.ok){msg("Fout: "+j.error);return;}msg("Check klaar — "+j.total+" producten, "+j.applied+" toegepast"+(j.apply?"":" (DRY-RUN: niets echt gewijzigd)"));}
-function msg(t){document.getElementById("msg").textContent=t;}
+async function runCheck(){msg("Bezig met controleren\\u2026");const res=await fetch("/api/reconcile?secret="+encodeURIComponent(PW));const j=await res.json();if(!j.ok){msg("Fout: "+j.error);return;}msg("Check klaar \\u2014 "+j.total+" producten, "+j.applied+" toegepast"+(j.apply?"":" (TESTMODUS: niets echt gewijzigd)"));}
+function msg(t){var m=document.getElementById("msg");if(m)m.textContent=t;}
 function upd(i,k,v){window._rows[i][k]=v;}
-function render(rows){window._rows=rows;let h='<div style="display:flex;gap:12px;align-items:center;margin-bottom:16px"><h2 style="margin:0">PadeLMQ — Voorraadprijzen</h2><button onclick="runCheck()">Nu controleren</button><span class="muted" id="msg"></span></div><p class="muted">Producten met tag <code>auto-stock-price</code>. Prijs A = eigen BE-voorraad (gratis verz.). Prijs B = dropship. Opslag = extra op Prijs B voor buiten BE/NL. Buiten-BE/NL-prijs = prijs als enkel BE-voorraad (leeg = daar uitverkocht). Vergrendeld = app raakt product niet aan.</p><div class="card" style="padding:0;overflow:hidden"><table><thead><tr><th>Product</th><th>Shop nu</th><th>Prijs A</th><th>Prijs B</th><th>Opslag buiten BE/NL</th><th>Buiten-BE/NL-prijs</th><th>Aan</th><th>Vergr.</th><th>Toestand</th><th>Europa</th><th></th></tr></thead><tbody>';
-if(!rows.length)h+='<tr><td colspan="11" class="muted" style="padding:16px">Nog geen producten met de tag <code>auto-stock-price</code>.</td></tr>';
-rows.forEach((r,i)=>{h+='<tr><td>'+r.title+'</td><td>€ '+r.currentPrice+'</td><td><input class="num" value="'+r.priceA+'" oninput="upd('+i+',\\'priceA\\',this.value)"></td><td><input class="num" value="'+r.priceB+'" oninput="upd('+i+',\\'priceB\\',this.value)"></td><td><input class="num" value="'+r.marketSurcharge+'" oninput="upd('+i+',\\'marketSurcharge\\',this.value)"></td><td><input class="num" value="'+r.euBePrice+'" oninput="upd('+i+',\\'euBePrice\\',this.value)"></td><td><input type="checkbox" '+(r.enabled?"checked":"")+' onchange="upd('+i+',\\'enabled\\',this.checked)"></td><td><input type="checkbox" '+(r.locked?"checked":"")+' onchange="upd('+i+',\\'locked\\',this.checked)"></td><td class="muted">'+(r.state||"—")+'</td><td class="muted">'+(r.euState||"—")+'</td><td><button style="background:#111827" onclick="save('+i+')">Opslaan</button></td></tr>';});
-h+='</tbody></table></div>';app.innerHTML=h;}
+function setTab(t){TAB=t;render(window._rows);}
+function statePill(s){var m={"stock-be":["be","Eigen BE-voorraad"],"stock-es":["es","Spanje (dropship)"],"stock-leeg":["leeg","Uitverkocht"]};var x=m[s];return x?'<span class="pill '+x[0]+'">'+x[1]+'</span>':'<span class="pill">—</span>';}
+function euPill(e){if(!e||e==="off")return '<span class="pill euoff">Uitverkocht</span>';return '<span class="pill euon">Koopbaar '+e.replace("on:","\\u20ac ")+'</span>';}
+
+function render(rows){window._rows=rows;
+ var head='<div class="top"><h1>PadeLMQ — Voorraadprijzen</h1><button onclick="runCheck()">Nu controleren</button><span class="msg" id="msg"></span></div>'
+ +'<div class="tabs"><button class="tab '+(TAB==="ballen"?"on":"")+'" onclick="setTab(\\'ballen\\')">Ballendozen</button>'
+ +'<button class="tab '+(TAB==="markt"?"on":"")+'" onclick="setTab(\\'markt\\')">Per markt (collectie)</button></div>';
+ var body = TAB==="ballen" ? renderBallen(rows) : renderMarkt(rows);
+ app.innerHTML=head+'<div class="panel">'+body+'</div>';
+}
+
+function renderBallen(rows){
+ var h='<div style="padding:14px 16px 0"><div class="note"><b>Ballendozen.</b> Prijs A = eigen BE-voorraad (profiel Algemeen, geen doostoeslag). Prijs B = dropship uit Spanje (profiel Ballendozen). Buiten BE/NL: als Spanje leeg is \\u2192 uitverkocht. Vergrendeld = de app laat het product met rust.</div>'
+ +'<div class="advies"><div class="advies-t">\\ud83d\\udca1 Advies verkoopprijs (BE/NL)</div>'
+ +'<p><b>Verkoop eerst je eigen BE-voorraad</b> (Prijs A). Betere marge, gratis verzending boven \\u20ac100, snelle levering en <b>geen doostoeslag</b> \\u2014 dat is je sterkste aanbod. Pas als Kampenhout + ShopWeDo leeg zijn schakelt de app automatisch naar <b>dropship</b> (Prijs B, met doostoeslag, tragere levering uit Spanje).</p>'
+ +'<p><b>Richtprijs t.o.v. concurrentie.</b> De scherpste BE/NL-concurrent voor een doos van 24 kokers zit rond <b>\\u20ac99</b> (Decathlon-niveau). Houd je verkoopprijs bij voorkeur onder \\u2248\\u20ac115 all-in; onder \\u20ac105 ben je duidelijk competitief. Prijs A mag hoger omdat je gratis + snel + zonder doostoeslag levert \\u2014 dat rechtvaardigt het verschil. Bij dropship (Prijs B) telt de klant de doostoeslag erbij: hou die all-in-prijs scherp.</p>'
+ +'<p class="hint">Concurrentprijzen wisselen \\u2014 check per doos even Decathlon/Padelmarkt v\\u00f3\\u00f3r je een nieuwe Prijs A/B vastzet. Prijzen in dit plan mikken op \\u224819% marge.</p></div></div>';
+ h+='<table><thead><tr><th>Product</th><th>Shop nu</th><th>Prijs A<br><span class="hint">eigen BE</span></th><th>Prijs B<br><span class="hint">dropship</span></th><th>Opslag Europa<br><span class="hint">op Prijs B</span></th><th>Aan</th><th>Vergr.</th><th>Toestand</th><th>Buiten BE/NL</th><th></th></tr></thead><tbody>';
+ if(!rows.length)h+='<tr><td colspan="10" class="hint" style="padding:16px">Nog geen producten met tag <code>auto-stock-price</code>.</td></tr>';
+ rows.forEach(function(r,i){h+='<tr><td class="prod">'+r.title+'</td><td>'+eur(r.currentPrice)+'</td>'
+  +'<td><input class="num" value="'+r.priceA+'" oninput="upd('+i+',\\'priceA\\',this.value)"></td>'
+  +'<td><input class="num" value="'+r.priceB+'" oninput="upd('+i+',\\'priceB\\',this.value)"></td>'
+  +'<td><input class="num" value="'+r.marketSurcharge+'" oninput="upd('+i+',\\'marketSurcharge\\',this.value)"></td>'
+  +'<td><input type="checkbox" '+(r.enabled?"checked":"")+' onchange="upd('+i+',\\'enabled\\',this.checked)"></td>'
+  +'<td><input type="checkbox" '+(r.locked?"checked":"")+' onchange="upd('+i+',\\'locked\\',this.checked)"></td>'
+  +'<td>'+statePill(r.state)+'</td><td>'+euPill(r.euState)+'</td>'
+  +'<td><button class="dark" onclick="save('+i+')">Opslaan</button></td></tr>';});
+ return h+'</tbody></table>';
+}
+
+function renderMarkt(rows){
+ var h='<div style="padding:14px 16px 0"><div class="note"><b>Per markt (hele collectie).</b> Voor producten die je buiten BE/NL <b>niet uitverkocht</b> wil zetten maar aan een <b>andere prijs</b> wil verkopen zolang je BE-voorraad hebt. Vul \\u201cBuiten-BE/NL-prijs\\u201d in \\u2192 dan blijft het buiten BE/NL koopbaar aan die prijs als Spanje leeg is, en zakt automatisch terug naar Prijs B zodra Spanje weer voorraad heeft. Laat je het leeg \\u2192 uitverkocht (zoals bij de ballen). <i>Nog niet in gebruik; staat klaar voor later.</i></div></div>';
+ h+='<table><thead><tr><th>Product</th>'
+  +'<th>BE/NL &middot; eigen voorraad<br><span class="hint">= Prijs A</span></th>'
+  +'<th>BE/NL &middot; dropship<br><span class="hint">= Prijs B</span></th>'
+  +'<th>Buiten BE/NL &middot; Spanje-voorraad<br><span class="hint">= Prijs B + opslag</span></th>'
+  +'<th>Buiten BE/NL &middot; enkel BE-voorraad<br><span class="hint">leeg = uitverkocht</span></th>'
+  +'<th>Aan</th><th>Vergr.</th><th></th></tr></thead><tbody>';
+ if(!rows.length)h+='<tr><td colspan="8" class="hint" style="padding:16px">Nog geen producten met tag <code>auto-stock-price</code>.</td></tr>';
+ rows.forEach(function(r,i){var eb=(parseFloat(String(r.priceB).replace(",","."))||0)+(parseFloat(String(r.marketSurcharge).replace(",","."))||0);
+  h+='<tr><td class="prod">'+r.title+'</td>'
+  +'<td><input class="num" value="'+r.priceA+'" oninput="upd('+i+',\\'priceA\\',this.value)"></td>'
+  +'<td><input class="num" value="'+r.priceB+'" oninput="upd('+i+',\\'priceB\\',this.value)"></td>'
+  +'<td><span class="hint">\\u20ac '+(eb?eb.toFixed(2):"—")+'</span></td>'
+  +'<td><input class="num" placeholder="uitverkocht" value="'+r.euBePrice+'" oninput="upd('+i+',\\'euBePrice\\',this.value)"></td>'
+  +'<td><input type="checkbox" '+(r.enabled?"checked":"")+' onchange="upd('+i+',\\'enabled\\',this.checked)"></td>'
+  +'<td><input type="checkbox" '+(r.locked?"checked":"")+' onchange="upd('+i+',\\'locked\\',this.checked)"></td>'
+  +'<td><button class="dark" onclick="save('+i+')">Opslaan</button></td></tr>';});
+ return h+'</tbody></table>';
+}
 login();
 </script></body></html>`;
