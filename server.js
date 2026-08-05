@@ -187,17 +187,26 @@ async function reconcileAll() {
 
     const beNlChanged = target !== prev;
     const euChanged = euDesired !== prevEu;
-    if (!beNlChanged && !euChanged) { results.push({ ...base, action: "geen wissel" }); continue; }
 
-    // BE/NL prijs + verzendprofiel
+    // BE/NL doelprijs + verzendprofiel voor de huidige voorraadtoestand
     let price = null, profile = null;
     if (target === "stock-be") { price = priceA; profile = PROFILES.algemeen; }
     else if (target === "stock-es") { price = priceB; profile = PROFILES.ballendozen; }
+
+    // HANDHAVING: als een andere app of handmatige actie de prijs heeft gewijzigd
+    // terwijl de voorraadtoestand gelijk bleef, zet de app hem elke ronde terug.
+    const curPrice = num(variant.price);
+    const wantPrice = num(price);
+    const priceDrift = wantPrice != null && curPrice != null && Math.abs(wantPrice - curPrice) >= 0.005;
+    const beNlAction = beNlChanged || priceDrift; // toepassen bij wissel OF afwijking
+
+    if (!beNlAction && !euChanged) { results.push({ ...base, action: "geen wissel" }); continue; }
 
     const parts = [];
     if (beNlChanged) parts.push(target === "stock-leeg"
       ? "BE/NL -> uitverkocht (prijs ongewijzigd)"
       : `BE/NL prijs -> ${price}, profiel -> ${target === "stock-be" ? "Algemeen" : "Ballendozen"}`);
+    else if (priceDrift) parts.push(`BE/NL prijs hersteld ${variant.price} -> ${price} (was gewijzigd door iets anders)`);
     if (euChanged) parts.push(eu.on
       ? `Europa -> koopbaar aan ${eu.price}`
       : "Europa -> uitverkocht (verborgen)");
@@ -205,8 +214,8 @@ async function reconcileAll() {
 
     if (!APPLY) { results.push({ ...base, action: "[DRY-RUN] " + action }); continue; }
     try {
-      if (beNlChanged && price) await setPrice(p.id, variant.id, price);
-      if (beNlChanged && profile) await setProfile(profile, variant.id);
+      if (beNlAction && price) await setPrice(p.id, variant.id, price);
+      if (beNlAction && profile) await setProfile(profile, variant.id);
       if (euChanged) {
         if (eu.on) { await setEuropaPrice(variant.id, eu.price); await setEuropaPublish(p.id, true); }
         else { await setEuropaPublish(p.id, false); }
