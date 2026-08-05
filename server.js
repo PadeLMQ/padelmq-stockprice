@@ -59,7 +59,7 @@ async function gql(query, variables = {}) {
 async function fetchManaged() {
   const query = `query M($q:String!,$after:String){products(first:50,query:$q,after:$after){
     pageInfo{hasNextPage endCursor}
-    edges{node{ id title status
+    edges{node{ id title status tags
       metafields(first:20,namespace:"${NS}"){edges{node{key value}}}
       variants(first:1){edges{node{ id price
         inventoryItem{inventoryLevels(first:20){edges{node{location{id} quantities(names:["available"]){name quantity}}}}}
@@ -186,6 +186,24 @@ async function reconcileAll() {
 
     if (!enabled) { results.push({ ...base, action: "overgeslagen (uit)" }); continue; }
     if (locked) { results.push({ ...base, action: "overgeslagen (vergrendeld)" }); continue; }
+
+    // Display-tag (ballen_gratis / ballen_toeslag) volgt de voorraad — elke ronde gehandhaafd.
+    // Deze tag stuurt de "gratis vs doostoeslag"-boodschap op product-/winkelwagenpagina.
+    // stock-be -> ballen_gratis, alleen-Spanje -> ballen_toeslag, leeg -> ongemoeid.
+    if (APPLY && (target === "stock-be" || target === "stock-es")) {
+      const wantGratis = target === "stock-be";
+      const tags = p.tags || [];
+      try {
+        if (wantGratis) {
+          if (tags.includes("ballen_toeslag")) await tagRemove(p.id, "ballen_toeslag");
+          if (!tags.includes("ballen_gratis")) await tagAdd(p.id, "ballen_gratis");
+        } else {
+          if (tags.includes("ballen_gratis")) await tagRemove(p.id, "ballen_gratis");
+          if (!tags.includes("ballen_toeslag")) await tagAdd(p.id, "ballen_toeslag");
+        }
+      } catch (e) { /* tag-sync mag de prijslogica niet blokkeren */ }
+    }
+
     if (target === "stock-be" && !priceA) { results.push({ ...base, action: "overgeslagen (Prijs A ontbreekt)" }); continue; }
     if (target === "stock-es" && !priceB) { results.push({ ...base, action: "overgeslagen (Prijs B ontbreekt)" }); continue; }
 
@@ -388,7 +406,7 @@ const PAGE = `<!doctype html><html lang="nl"><head><meta charset="utf-8">
 <style>
 :root{--groen:#0f766e;--groen2:#0b6e4f;--rand:#e5e7eb;--grijs:#6b7280;--bg:#f6f7f9}
 *{box-sizing:border-box}body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:#111827;margin:0}
-.wrap{max-width:1240px;margin:0 auto;padding:20px 16px 60px}
+.wrap{max-width:1600px;margin:0 auto;padding:20px 16px 60px}
 .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:6px}
 h1{font-size:22px;margin:0;font-weight:700}
 .sub{color:var(--grijs);font-size:13px;margin:2px 0 16px}
@@ -399,14 +417,14 @@ button.dark{background:#111827}
 .tabs{display:flex;gap:6px;border-bottom:1px solid var(--rand);margin:8px 0 0}
 .tab{padding:10px 16px;border:none;background:none;color:var(--grijs);font-size:14px;font-weight:600;cursor:pointer;border-bottom:2px solid transparent;border-radius:0}
 .tab.on{color:var(--groen);border-bottom:2px solid var(--groen)}
-.panel{background:#fff;border:1px solid var(--rand);border-top:none;border-radius:0 0 12px 12px;overflow:hidden}
+.panel{background:#fff;border:1px solid var(--rand);border-top:none;border-radius:0 0 12px 12px;overflow-x:auto}
 .note{background:#f0fdfa;border:1px solid #99f6e4;color:#115e59;font-size:13px;padding:10px 14px;border-radius:10px;margin:14px 0}
 table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{padding:10px 12px;text-align:left;white-space:nowrap}
+th,td{padding:7px 8px;text-align:left;white-space:nowrap}
 thead tr{background:#f9fafb;color:#374151}th{font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
 tbody tr{border-top:1px solid #f1f1f1}tbody tr:hover{background:#fafafa}
-td.prod{white-space:normal;max-width:280px;font-weight:600}
-input{padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;font-size:14px}input.num{width:88px}
+td.prod{white-space:normal;max-width:190px;font-weight:600;font-size:13px}
+input{padding:5px 6px;border:1px solid #d1d5db;border-radius:6px;font-size:13px}input.num{width:70px}
 .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#f3f4f6;color:#374151}
 .pill.be{background:#dcfce7;color:#166534}.pill.es{background:#fef9c3;color:#854d0e}.pill.leeg{background:#fee2e2;color:#991b1b}
 .pill.euon{background:#dbeafe;color:#1e40af}.pill.euoff{background:#f3f4f6;color:#6b7280}
