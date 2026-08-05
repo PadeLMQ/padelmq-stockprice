@@ -38,6 +38,7 @@ const MF = {
   euBePrice: "eu_be_price",             // Europa-prijs als ENKEL BE-voorraad; leeg = uitverkocht buiten BE/NL
   competitor: "competitor",             // laagste concurrentprijs (kale productprijs, info voor advies)
   competitorShip: "competitor_ship",    // verzendkost van de concurrent naar BE (voor all-in-vergelijking)
+  cost: "cost",                         // inkoopprijs EX btw (voor winstberekening; wijzigt de prijs niet)
   locked: "locked", state: "state", euState: "eu_state", log: "log",
 };
 const DOOSTOESLAG = 9.95; // richtwaarde doostoeslag voor de all-in-berekening bij dropship
@@ -255,6 +256,7 @@ const server = http.createServer(async (req, res) => {
           priceA: c[MF.priceA] ?? "", priceB: c[MF.priceB] ?? "",
           marketSurcharge: c[MF.marketSurcharge] ?? "", euBePrice: c[MF.euBePrice] ?? "",
           competitor: c[MF.competitor] ?? "", competitorShip: c[MF.competitorShip] ?? "",
+          cost: c[MF.cost] ?? "",
           state: c[MF.state] ?? "", euState: c[MF.euState] ?? "" };
       });
       return send(res, 200, { ok: true, rows });
@@ -270,6 +272,7 @@ const server = http.createServer(async (req, res) => {
           await setMeta(b.id, { [MF.priceA]: b.priceA ?? "", [MF.priceB]: b.priceB ?? "",
             [MF.marketSurcharge]: b.marketSurcharge ?? "", [MF.euBePrice]: b.euBePrice ?? "",
             [MF.competitor]: b.competitor ?? "", [MF.competitorShip]: b.competitorShip ?? "",
+            [MF.cost]: b.cost ?? "",
             [MF.enabled]: b.enabled ? "true" : "false", [MF.locked]: b.locked ? "true" : "false" });
           send(res, 200, { ok: true });
         } catch (e) { send(res, 500, { ok: false, error: e.message }); }
@@ -346,6 +349,9 @@ td.advc div{margin:1px 0}
 <script>
 let PW="", TAB="ballen";
 const DOOSTOESLAG_JS=9.95;
+const PALLET_JS=4.41;     // pallet/handling eigen voorraad (ex btw)
+const SHOPWEDO_JS=6.14;   // verzendkost eigen voorraad BE/NL (ShopWeDo, ex btw) - jij draagt deze
+const DROP_JS=1.78;       // netto verzendtekort dropship (doostoeslag dekt de rest)
 const app=document.getElementById("app");
 const eur=v=>v?("\\u20ac "+v):"—";
 
@@ -379,13 +385,15 @@ function advies(r){
  return out.join('');
 }
 function renderBallen(rows){
- var h='<div style="padding:14px 16px 0"><div class="note"><b>Advies per doos.</b> <b>Concurrent</b> = concurrentprijs (bovenste veld) + <b>hun verzendkost</b> naar BE (onderste veld) = de <b>all-in</b>-prijs die de klant daar echt betaalt. De app verkoopt eerst je <b>eigen BE-stock</b> aan <b>Prijs A</b> (jij levert gratis, geen doostoeslag); pas als BE leeg is \\u2192 <b>dropship</b> (Prijs B, de klant betaalt +\\u2248\\u20ac9,95 doostoeslag). In de kolom <b>Advies</b> vergelijkt de app jouw all-in met die van de concurrent (\\u2713 = op of onder de concurrent all-in). Concurrent-velden wijzigen je verkoopprijs niet. Vergrendeld = app laat het product met rust.</div></div>';
- h+='<table><thead><tr><th>Product</th><th>Shop nu</th><th>Concurrent<br><span class="hint">prijs / + verz.</span></th><th>Prijs A<br><span class="hint">eigen BE</span></th><th>Prijs B<br><span class="hint">dropship</span></th><th>Advies<br><span class="hint">BE/NL &amp; dropship</span></th><th>Opslag EU<br><span class="hint">op Prijs B</span></th><th>Aan</th><th>Vergr.</th><th>Toestand</th><th>Buiten BE/NL</th><th></th></tr></thead><tbody>';
- if(!rows.length)h+='<tr><td colspan="12" class="hint" style="padding:16px">Nog geen producten met tag <code>auto-stock-price</code>.</td></tr>';
+ var h='<div style="padding:14px 16px 0"><div class="note"><b>Advies per doos.</b> <b>Concurrent</b> = concurrentprijs (bovenste veld) + <b>hun verzendkost</b> naar BE (onderste veld) = de <b>all-in</b>-prijs die de klant daar echt betaalt. De app verkoopt eerst je <b>eigen BE-stock</b> aan <b>Prijs A</b> (jij levert gratis, geen doostoeslag); pas als BE leeg is \\u2192 <b>dropship</b> (Prijs B, de klant betaalt +\\u2248\\u20ac9,95 doostoeslag). In de kolom <b>Advies</b> vergelijkt de app jouw all-in met die van de concurrent (\\u2713 = op of onder de concurrent all-in). Concurrent-velden wijzigen je verkoopprijs niet. <b>Inkoop</b> (ex btw) \\u2192 kolom <b>Winst</b> toont je marge per doos: <i>eigen</i> (Prijs A, min \\u20ac4,41 pallet + \\u20ac6,14 verzending die jij draagt) en <i>dropship</i> (Prijs B, doostoeslag dekt de verzending). Vergrendeld = app laat het product met rust.</div></div>';
+ h+='<table><thead><tr><th>Product</th><th>Shop nu</th><th>Concurrent<br><span class="hint">prijs / + verz.</span></th><th>Prijs A<br><span class="hint">eigen BE</span></th><th>Prijs B<br><span class="hint">dropship</span></th><th>Inkoop<br><span class="hint">ex btw</span></th><th>Winst<br><span class="hint">eigen / dropship</span></th><th>Advies<br><span class="hint">BE/NL &amp; dropship</span></th><th>Opslag EU<br><span class="hint">op Prijs B</span></th><th>Aan</th><th>Vergr.</th><th>Toestand</th><th>Buiten BE/NL</th><th></th></tr></thead><tbody>';
+ if(!rows.length)h+='<tr><td colspan="14" class="hint" style="padding:16px">Nog geen producten met tag <code>auto-stock-price</code>.</td></tr>';
  rows.forEach(function(r,i){h+='<tr><td class="prod">'+r.title+'</td><td>'+eur(r.currentPrice)+'</td>'
   +'<td><input class="num" placeholder="prijs" value="'+r.competitor+'" oninput="upd('+i+',\\'competitor\\',this.value);readvies('+i+')"><br><input class="num" placeholder="+ verz." value="'+r.competitorShip+'" oninput="upd('+i+',\\'competitorShip\\',this.value);readvies('+i+')" style="margin-top:4px"></td>'
   +'<td><input class="num" value="'+r.priceA+'" oninput="upd('+i+',\\'priceA\\',this.value);readvies('+i+')"></td>'
   +'<td><input class="num" value="'+r.priceB+'" oninput="upd('+i+',\\'priceB\\',this.value);readvies('+i+')"></td>'
+  +'<td><input class="num" placeholder="\\u2014" value="'+r.cost+'" oninput="upd('+i+',\\'cost\\',this.value);readvies('+i+')"></td>'
+  +'<td class="advc" id="win'+i+'" style="white-space:normal;min-width:130px;font-size:12px">'+winst(r)+'</td>'
   +'<td class="advc" id="adv'+i+'" style="white-space:normal;min-width:200px;font-size:12px">'+advies(r)+'</td>'
   +'<td><input class="num" value="'+r.marketSurcharge+'" oninput="upd('+i+',\\'marketSurcharge\\',this.value)"></td>'
   +'<td><input type="checkbox" '+(r.enabled?"checked":"")+' onchange="upd('+i+',\\'enabled\\',this.checked)"></td>'
@@ -394,7 +402,14 @@ function renderBallen(rows){
   +'<td><button class="dark" onclick="save('+i+')">Opslaan</button></td></tr>';});
  return h+'</tbody></table>';
 }
-function readvies(i){var c=document.getElementById("adv"+i);if(c)c.innerHTML=advies(window._rows[i]);}
+function readvies(i){var c=document.getElementById("adv"+i);if(c)c.innerHTML=advies(window._rows[i]);var w=document.getElementById("win"+i);if(w)w.innerHTML=winst(window._rows[i]);}
+function winst(r){
+ var cost=num2(r.cost); if(cost==null) return '<span class="hint">vul inkoop in</span>';
+ var A=num2(r.priceA), B=num2(r.priceB); var out=[];
+ if(A!=null){var ex=A/1.21;var w=ex-cost-PALLET_JS-SHOPWEDO_JS;var cls=w>=0?"ok":"warn";out.push('<div><b>eigen</b> <span class="'+cls+'">\\u20ac'+w.toFixed(2)+'</span> <span class="hint">('+(w/ex*100).toFixed(0)+'%)</span></div>');}
+ if(B!=null){var ex2=B/1.21;var w2=ex2-cost-DROP_JS;var cls2=w2>=0?"ok":"warn";out.push('<div><b>dropship</b> <span class="'+cls2+'">\\u20ac'+w2.toFixed(2)+'</span> <span class="hint">('+(w2/ex2*100).toFixed(0)+'%)</span></div>');}
+ return out.join('');
+}
 
 function renderMarkt(rows){
  var h='<div style="padding:14px 16px 0"><div class="note"><b>Per markt (hele collectie).</b> Voor producten die je buiten BE/NL <b>niet uitverkocht</b> wil zetten maar aan een <b>andere prijs</b> wil verkopen zolang je BE-voorraad hebt. Vul \\u201cBuiten-BE/NL-prijs\\u201d in \\u2192 dan blijft het buiten BE/NL koopbaar aan die prijs als Spanje leeg is, en zakt automatisch terug naar Prijs B zodra Spanje weer voorraad heeft. Laat je het leeg \\u2192 uitverkocht (zoals bij de ballen). <i>Nog niet in gebruik; staat klaar voor later.</i></div></div>';
