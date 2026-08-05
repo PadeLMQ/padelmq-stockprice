@@ -39,9 +39,70 @@ const MF = {
   competitor: "competitor",             // laagste concurrentprijs (kale productprijs, info voor advies)
   competitorShip: "competitor_ship",    // verzendkost van de concurrent naar BE (voor all-in-vergelijking)
   cost: "cost",                         // inkoopprijs EX btw (voor winstberekening; wijzigt de prijs niet)
+  tiendaPrice: "tienda_price",          // dagelijks opgehaalde webshopprijs van Tienda Padelpoint (incl btw, uitgelogd)
+  tiendaAt: "tienda_at",                // tijdstip laatste geslaagde Tienda-ophaling (ISO)
   locked: "locked", state: "state", euState: "eu_state", log: "log",
 };
 const DOOSTOESLAG = 9.95; // richtwaarde doostoeslag voor de all-in-berekening bij dropship
+
+// ---------- Tienda Padelpoint: dagelijkse webshopprijs ophalen ----------
+// De app haalt zelf (uitgelogd, dus de prijs die een gewone bezoeker ziet) elke dag de
+// verkoopprijs op de Tienda-productpagina op en bewaart die per product als metafield.
+// Enkel merken die Tienda voert; Tecnifibre/Lok/Nox staan er niet -> geen Tienda-prijs.
+const TIENDA_BASE = "https://www.tiendapadelpoint.com";
+const TIENDA_URLS = {
+  "gid://shopify/Product/9736319009117": "/cajon-de-pelotas-de-padel-bullpadel-premium-pro",         // Bullpadel Premium Pro
+  "gid://shopify/Product/9736319172957": "/cajon-72-pelotas--24-botes-de-3-uds--bullpadel-fip-next",  // Bullpadel Next
+  "gid://shopify/Product/9736320057693": "/cajon-72-pelotas--24-botes-de-3-uds--bullpadel-fip-next-pro", // Bullpadel Next Pro
+  "gid://shopify/Product/9736328610141": "/cajon-72-pelotas-padel-24-botes-de-3-uds-adidas-speed-rx", // Adidas Speed RX
+  "gid://shopify/Product/9736348762461": "/cajon-72-pelotas-24-botes-de-3-uds-siux-neo-1",            // Siux Neo
+  "gid://shopify/Product/9736348959069": "/cajon-72-pelotas-24-botes-de-3-uds-siux-neo-1",            // Siux Neo Speed (zelfde doos)
+  "gid://shopify/Product/9973706260829": "/cajon-72-pelotas-24-botes-de-3-uds-head-padel-pro-1",      // Head Pro+
+  "gid://shopify/Product/9974481027421": "/cajon-72-pelotas-24-botes-de-3-uds-head-padel-pro-s-1",    // Head Pro S+
+  "gid://shopify/Product/14747479245149": "/cajon-72-pelotas--24-botes-de-3-uds-babolat-court-padel", // Babolat Court
+  "gid://shopify/Product/14923553866077": "/cajon-72-pelotas-24-botes-de-3-uds-wilson-padel-premier-speed-1", // Wilson Premier Speed
+  "gid://shopify/Product/14923650335069": "/cajon-72-pelotas-24-botes-de-3-uds-wilson-padel-premier-1",       // Wilson Padel Premier
+  "gid://shopify/Product/15670635856221": "/cajones-de-pelotas-dunlop-pro-padel-es",                  // Dunlop Pro
+  "gid://shopify/Product/15671873274205": "/cajon-72-pelotas-24-botes-de-3-uds-black-crown-one",       // Black Crown One
+  "gid://shopify/Product/15672224907613": "/cajon-72-pelotas---24-botes-de-3-uds---vibora-elite-team", // Vibor-A Elite Team
+  "gid://shopify/Product/16032595640669": "/cajon-72-pelotas-24-botes-de-3-uds-alacran-nitro-1",       // Alacran Nitro
+  "gid://shopify/Product/16032610091357": "/cajon-72-pelotas-24-botes-de-3-uds-alacran-nitro-pro-1",   // Alacran Nitro Pro
+};
+function parseTiendaPrice(html) {
+  let m = html.match(/property="product:price:amount"[^>]*content="([\d.]+)"/i)
+       || html.match(/content="([\d.]+)"[^>]*property="product:price:amount"/i);
+  if (m) return parseFloat(m[1]);
+  const j = html.indexOf('"@type":"Product"');            // JSON-LD Product-blok
+  if (j >= 0) { const p = html.slice(j, j + 2500).match(/"price"\s*:\s*"?([\d.]+)"?/i); if (p) return parseFloat(p[1]); }
+  m = html.match(/itemprop="price"[^>]*content="([\d.]+)"/i);
+  if (m) return parseFloat(m[1]);
+  return null;
+}
+async function fetchTiendaPrice(path) {
+  const res = await fetch(TIENDA_BASE + path, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "nl-BE,nl;q=0.9,en;q=0.8",
+    },
+    redirect: "follow",
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return parseTiendaPrice(await res.text());
+}
+async function reconcileTienda() {
+  const out = { total: 0, updated: 0, failed: 0, errors: [] };
+  for (const [id, path] of Object.entries(TIENDA_URLS)) {
+    out.total++;
+    try {
+      const price = await fetchTiendaPrice(path);
+      if (price == null) { out.failed++; out.errors.push(path + ": geen prijs gevonden"); continue; }
+      if (APPLY) await setMeta(id, { [MF.tiendaPrice]: price.toFixed(2), [MF.tiendaAt]: new Date().toISOString() });
+      out.updated++;
+    } catch (err) { out.failed++; out.errors.push(path + ": " + err.message); }
+  }
+  return out;
+}
 
 // ---------- Shopify Admin API ----------
 async function gql(query, variables = {}) {
@@ -330,6 +391,8 @@ const server = http.createServer(async (req, res) => {
           marketSurcharge: c[MF.marketSurcharge] ?? "", euBePrice: c[MF.euBePrice] ?? "",
           competitor: c[MF.competitor] ?? "", competitorShip: c[MF.competitorShip] ?? "",
           cost: c[MF.cost] ?? "",
+          tiendaPrice: c[MF.tiendaPrice] ?? "", tiendaAt: c[MF.tiendaAt] ?? "",
+          hasTienda: Object.prototype.hasOwnProperty.call(TIENDA_URLS, p.id),
           state: c[MF.state] ?? "", euState: c[MF.euState] ?? "" };
       });
       return send(res, 200, { ok: true, rows });
@@ -368,6 +431,13 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, apply: APPLY, ...r });
     }
 
+    if (url.pathname === "/api/tienda") {
+      const provided = url.searchParams.get("secret") || req.headers["x-cron-secret"];
+      if (CRON_SECRET && provided !== CRON_SECRET) return send(res, 401, { ok: false, error: "unauthorized" });
+      const r = await reconcileTienda();
+      return send(res, 200, { ok: true, apply: APPLY, ...r });
+    }
+
     send(res, 404, { ok: false, error: "not found" });
   } catch (e) { send(res, 500, { ok: false, error: e.message }); }
 });
@@ -395,6 +465,16 @@ server.listen(PORT, () => {
     setTimeout(runExpress, 45000);
     setInterval(runExpress, expressEvery * 60000);
     console.log(`[express] scheduler: elke ${expressEvery} min`);
+    // Tienda-prijzen: 1x per dag ophalen (uitgelogde webshopprijs van de leverancier).
+    const runTienda = async () => {
+      try {
+        const r = await reconcileTienda();
+        console.log(`[tienda] ${r.total} dozen, ${r.updated} bijgewerkt, ${r.failed} mislukt${APPLY ? "" : " (DRY-RUN: niets opgeslagen)"}`);
+      } catch (e) { console.error("[tienda] fout:", e.message); }
+    };
+    setTimeout(runTienda, 90000);
+    setInterval(runTienda, 24 * 60 * 60000);
+    console.log("[tienda] scheduler: elke 24 uur");
   } else {
     console.log("[stockprice] scheduler uit (RECONCILE_INTERVAL_MINUTES niet gezet)");
   }
@@ -434,6 +514,42 @@ input{padding:5px 6px;border:1px solid #d1d5db;border-radius:6px;font-size:13px}
 .advies p{margin:6px 0;font-size:13px;line-height:1.5;color:#3f3f46}
 .ok{color:#166534;font-weight:600}.warn{color:#b45309;font-weight:600}
 td.advc div{margin:1px 0}
+/* ---- Kaart-weergave ballendozen ---- */
+.cards{padding:14px 14px 6px}
+.card{background:#fff;border:1px solid var(--rand);border-radius:14px;margin-bottom:10px;overflow:hidden;transition:box-shadow .15s}
+.card.open{box-shadow:0 6px 20px rgba(0,0,0,.07);border-color:#cbd5e1}
+.chead{display:grid;grid-template-columns:1fr auto auto 26px;gap:16px;align-items:center;padding:14px 16px;cursor:pointer}
+.chead:hover{background:#fafafa}
+.pname{font-weight:700;font-size:15px;margin-bottom:5px}
+.situ{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--grijs);white-space:normal}
+.dot{width:9px;height:9px;border-radius:50%;flex:none}
+.dot.be{background:#22c55e}.dot.es{background:#eab308}.dot.leeg{background:#ef4444}
+.kcol{text-align:right}
+.kcol .lab{font-size:11px;color:var(--grijs);text-transform:uppercase;letter-spacing:.03em;margin-bottom:2px}
+.kcol .val{font-size:18px;font-weight:700}
+.kcol .val.pos{color:#15803d}.kcol .val.neg{color:#b45309}.kcol .val.mut{color:#9ca3af;font-weight:600}
+.chev{color:#9ca3af;font-size:20px;transition:transform .18s;justify-self:center}
+.card.open .chev{transform:rotate(90deg)}
+.detail{display:none;padding:2px 16px 18px;border-top:1px solid #f1f1f1}
+.card.open .detail{display:block}
+.doing{background:#f8fafc;border:1px solid #eef2f6;border-radius:10px;padding:11px 14px;font-size:13px;line-height:1.5;margin:14px 0;color:#334155}
+.tienda{display:flex;align-items:center;justify-content:space-between;gap:10px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:10px;padding:10px 14px;font-size:13px;margin:14px 0}
+.tienda .lab{color:#3730a3;font-weight:600}
+.tienda .v{font-size:17px;font-weight:700;color:#312e81}
+.tienda .v.mut{color:#9ca3af;font-size:13px;font-weight:600}
+.tienda .d{font-size:11px;color:#6366f1;font-weight:500;margin-left:6px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}
+.box{border:1px solid var(--rand);border-radius:10px;padding:12px}
+.box h4{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:var(--grijs);font-weight:700}
+.box.active{border-color:#5eead4;background:#f0fdfa}
+.fieldrow{display:flex;align-items:center;gap:8px;margin:6px 0;flex-wrap:wrap}
+.fieldrow label{font-size:13px;color:#374151;min-width:92px}
+.win{font-size:13px;margin-top:8px}
+.win .pos{color:#15803d;font-weight:700}.win .neg{color:#b45309;font-weight:700}.win .muted{color:#9ca3af}
+.activeflag{display:inline-block;font-size:11px;font-weight:700;color:#0f766e;background:#ccfbf1;border-radius:999px;padding:1px 8px;margin-left:6px}
+.foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:14px}
+.toggles{display:flex;gap:16px;font-size:13px;color:#374151;flex-wrap:wrap}
+.toggles label{display:flex;align-items:center;gap:6px;cursor:pointer}
 .login{max-width:360px;margin:14vh auto;background:#fff;border:1px solid var(--rand);border-radius:12px;padding:22px}
 </style></head>
 <body><div class="wrap" id="app"></div>
@@ -475,25 +591,69 @@ function advies(r){
  if(B!=null){var allin=B+DOOSTOESLAG_JS;var okB=allin<=comp+0.005;out.push('<div><b>dropship</b> all-in \\u20ac'+allin.toFixed(2)+' <span class="hint">(\\u20ac'+B.toFixed(2)+'+\\u20ac'+DOOSTOESLAG_JS.toFixed(2)+')</span> '+(okB?'<span class="ok">\\u2713</span>':'<span class="warn">+\\u20ac'+(allin-comp).toFixed(2)+'</span>')+'</div>');}
  return out.join('');
 }
-function renderBallen(rows){
- var h='<div style="padding:14px 16px 0"><div class="note"><b>Advies per doos.</b> <b>Concurrent</b> = concurrentprijs (bovenste veld) + <b>hun verzendkost</b> naar BE (onderste veld) = de <b>all-in</b>-prijs die de klant daar echt betaalt. De app verkoopt eerst je <b>eigen BE-stock</b> aan <b>Prijs A</b> (jij levert gratis, geen doostoeslag); pas als BE leeg is \\u2192 <b>dropship</b> (Prijs B, de klant betaalt +\\u2248\\u20ac9,95 doostoeslag). In de kolom <b>Advies</b> vergelijkt de app jouw all-in met die van de concurrent (\\u2713 = op of onder de concurrent all-in). Concurrent-velden wijzigen je verkoopprijs niet. <b>Inkoop</b> (ex btw) \\u2192 kolom <b>Winst</b> toont je marge per doos: <i>eigen</i> (Prijs A, min \\u20ac4,41 pallet + \\u20ac6,14 verzending die jij draagt) en <i>dropship</i> (Prijs B, doostoeslag dekt de verzending). Vergrendeld = app laat het product met rust.</div></div>';
- h+='<table><thead><tr><th>Product</th><th>Shop nu</th><th>Concurrent<br><span class="hint">prijs / + verz.</span></th><th>Prijs A<br><span class="hint">eigen BE</span></th><th>Prijs B<br><span class="hint">dropship</span></th><th>Inkoop<br><span class="hint">ex btw</span></th><th>Winst<br><span class="hint">eigen / dropship</span></th><th>Advies<br><span class="hint">BE/NL &amp; dropship</span></th><th>Opslag EU<br><span class="hint">op Prijs B</span></th><th>Aan</th><th>Vergr.</th><th>Toestand</th><th>Buiten BE/NL</th><th></th></tr></thead><tbody>';
- if(!rows.length)h+='<tr><td colspan="14" class="hint" style="padding:16px">Nog geen producten met tag <code>auto-stock-price</code>.</td></tr>';
- rows.forEach(function(r,i){h+='<tr><td class="prod">'+r.title+'</td><td>'+eur(r.currentPrice)+'</td>'
-  +'<td><input class="num" placeholder="prijs" value="'+r.competitor+'" oninput="upd('+i+',\\'competitor\\',this.value);readvies('+i+')"><br><input class="num" placeholder="+ verz." value="'+r.competitorShip+'" oninput="upd('+i+',\\'competitorShip\\',this.value);readvies('+i+')" style="margin-top:4px"></td>'
-  +'<td><input class="num" value="'+r.priceA+'" oninput="upd('+i+',\\'priceA\\',this.value);readvies('+i+')"></td>'
-  +'<td><input class="num" value="'+r.priceB+'" oninput="upd('+i+',\\'priceB\\',this.value);readvies('+i+')"></td>'
-  +'<td><input class="num" placeholder="\\u2014" value="'+r.cost+'" oninput="upd('+i+',\\'cost\\',this.value);readvies('+i+')"></td>'
-  +'<td class="advc" id="win'+i+'" style="white-space:normal;min-width:130px;font-size:12px">'+winst(r)+'</td>'
-  +'<td class="advc" id="adv'+i+'" style="white-space:normal;min-width:200px;font-size:12px">'+advies(r)+'</td>'
-  +'<td><input class="num" value="'+r.marketSurcharge+'" oninput="upd('+i+',\\'marketSurcharge\\',this.value)"></td>'
-  +'<td><input type="checkbox" '+(r.enabled?"checked":"")+' onchange="upd('+i+',\\'enabled\\',this.checked)"></td>'
-  +'<td><input type="checkbox" '+(r.locked?"checked":"")+' onchange="upd('+i+',\\'locked\\',this.checked)"></td>'
-  +'<td>'+statePill(r.state)+'</td><td>'+euPill(r.euState)+'</td>'
-  +'<td><button class="dark" onclick="save('+i+')">Opslaan</button></td></tr>';});
- return h+'</tbody></table>';
+var SITU={"stock-be":["be","Eigen BE-voorraad \\u00b7 gratis verzending \\u00b7 <b>Prijs A</b> actief"],
+          "stock-es":["es","Dropship uit Spanje \\u00b7 +\\u20ac9,95 doostoeslag \\u00b7 <b>Prijs B</b> actief"],
+          "stock-leeg":["leeg","Geen voorraad \\u00b7 staat op <b>uitverkocht</b>"]};
+function money(v){var n=num2(v);return n==null?"\\u2014":("\\u20ac "+n.toFixed(2));}
+function winEigen(r){var c=num2(r.cost),A=num2(r.priceA);if(c==null||A==null)return null;return A/1.21-c-PALLET_JS-SHOPWEDO_JS;}
+function winDrop(r){var c=num2(r.cost),B=num2(r.priceB);if(c==null||B==null)return null;return B/1.21-c-DROP_JS;}
+function winNow(r){if(r.state==="stock-be")return winEigen(r);if(r.state==="stock-es")return winDrop(r);return null;}
+function winLine(w,base){if(w==null)return '<span class="muted">\\u2014 vul inkoop in</span>';var b=num2(base);var pct=b?(' ('+(w/(b/1.21)*100).toFixed(0)+'%)'):'';var cls=w>=0?"pos":"neg";return '<b>Winst</b> <span class="'+cls+'">\\u20ac'+w.toFixed(2)+'</span> <span class="hint">'+pct+'</span>';}
+function fmtDate(iso){if(!iso)return '';var d=new Date(iso);if(isNaN(d.getTime()))return '';return d.toLocaleDateString('nl-BE',{day:'2-digit',month:'2-digit'});}
+function toggle(i){var c=document.getElementById('card'+i);if(c)c.classList.toggle('open');}
+function tiendaHTML(r){
+ if(!r.hasTienda) return '<span class="v mut">niet bij Tienda</span>';
+ if(!r.tiendaPrice) return '<span class="v mut">nog niet opgehaald</span>';
+ return '<span class="v">\\u20ac '+num2(r.tiendaPrice).toFixed(2)+'</span>'+(r.tiendaAt?'<span class="d">bijgewerkt '+fmtDate(r.tiendaAt)+'</span>':'');
 }
-function readvies(i){var c=document.getElementById("adv"+i);if(c)c.innerHTML=advies(window._rows[i]);var w=document.getElementById("win"+i);if(w)w.innerHTML=winst(window._rows[i]);}
+function renderBallen(rows){
+ var h='<div class="cards">';
+ if(!rows.length) h+='<div class="hint" style="padding:16px">Nog geen producten met tag <code>auto-stock-price</code>.</div>';
+ rows.forEach(function(r,i){
+  var s=SITU[r.state]||["","Nog niet bepaald \\u2014 wacht op eerste controle"];
+  var wn=winNow(r); var wnCls=wn==null?"mut":(wn>=0?"pos":"neg"); var wnTxt=wn==null?"\\u2014":("\\u20ac"+wn.toFixed(2));
+  var beA=r.state==="stock-be", esA=r.state==="stock-es";
+  var doing=r.state==="stock-be"?"Verkoopt nu uit je eigen BE-voorraad aan Prijs A (gratis verzending). Zodra BE leeg is, schakelt de app automatisch naar dropship (Prijs B)."
+   :r.state==="stock-es"?"Verkoopt nu via dropship uit Spanje aan Prijs B (de klant betaalt +\\u20ac9,95 doostoeslag). Zodra er BE-voorraad is, gaat hij automatisch terug naar Prijs A."
+   :"Geen voorraad \\u2014 staat op uitverkocht. Zodra er ergens voorraad binnenkomt, wordt de doos vanzelf weer koopbaar.";
+  h+='<div class="card" id="card'+i+'">'
+   +'<div class="chead" onclick="toggle('+i+')">'
+    +'<div><div class="pname">'+r.title+'</div><div class="situ"><span class="dot '+s[0]+'"></span><span>'+s[1]+'</span></div></div>'
+    +'<div class="kcol"><div class="lab">Prijs nu</div><div class="val">'+money(r.currentPrice)+'</div></div>'
+    +'<div class="kcol"><div class="lab">Winst nu</div><div class="val '+wnCls+'" id="wnow'+i+'">'+wnTxt+'</div></div>'
+    +'<div class="chev">\\u203a</div>'
+   +'</div>'
+   +'<div class="detail">'
+    +'<div class="doing">'+doing+'</div>'
+    +'<div class="tienda"><span class="lab">Tienda (Padelpoint) \\u2014 online verkoopprijs</span><span>'+tiendaHTML(r)+'</span></div>'
+    +'<div class="grid2">'
+     +'<div class="box'+(beA?' active':'')+'"><h4>Eigen BE-voorraad'+(beA?' <span class="activeflag">nu actief</span>':'')+'</h4>'
+      +'<div class="fieldrow"><label>Prijs A</label><input class="num" value="'+r.priceA+'" oninput="upd('+i+',\\'priceA\\',this.value);readvies('+i+')"><span class="hint">gratis verz.</span></div>'
+      +'<div class="win" id="wa'+i+'">'+winLine(winEigen(r),r.priceA)+'</div></div>'
+     +'<div class="box'+(esA?' active':'')+'"><h4>Dropship (Spanje)'+(esA?' <span class="activeflag">nu actief</span>':'')+'</h4>'
+      +'<div class="fieldrow"><label>Prijs B</label><input class="num" value="'+r.priceB+'" oninput="upd('+i+',\\'priceB\\',this.value);readvies('+i+')"><span class="hint">+\\u20ac9,95 doos</span></div>'
+      +'<div class="win" id="wb'+i+'">'+winLine(winDrop(r),r.priceB)+'</div></div>'
+    +'</div>'
+    +'<div class="grid2">'
+     +'<div class="box"><h4>Inkoop</h4><div class="fieldrow"><label>Inkoop (ex btw)</label><input class="num" placeholder="\\u2014" value="'+r.cost+'" oninput="upd('+i+',\\'cost\\',this.value);readvies('+i+')"></div><div class="hint">Bepaalt je winst hierboven.</div></div>'
+     +'<div class="box"><h4>Concurrent (voor advies)</h4><div class="fieldrow"><label>Hun prijs</label><input class="num" placeholder="prijs" value="'+r.competitor+'" oninput="upd('+i+',\\'competitor\\',this.value);readvies('+i+')"></div><div class="fieldrow"><label>+ verzending</label><input class="num" placeholder="+ verz." value="'+r.competitorShip+'" oninput="upd('+i+',\\'competitorShip\\',this.value);readvies('+i+')"></div></div>'
+    +'</div>'
+    +'<div class="advies" id="adv'+i+'">'+advies(r)+'</div>'
+    +'<div class="foot"><div class="toggles">'
+     +'<label><input type="checkbox" '+(r.enabled?"checked":"")+' onchange="upd('+i+',\\'enabled\\',this.checked)"> App beheert deze doos</label>'
+     +'<label><input type="checkbox" '+(r.locked?"checked":"")+' onchange="upd('+i+',\\'locked\\',this.checked)"> Vergrendeld (met rust laten)</label>'
+    +'</div><button class="dark" onclick="save('+i+')">Opslaan</button></div>'
+   +'</div>'
+  +'</div>';
+ });
+ return h+'</div>';
+}
+function readvies(i){var r=window._rows[i];
+ var a=document.getElementById("adv"+i);if(a)a.innerHTML=advies(r);
+ var wa=document.getElementById("wa"+i);if(wa)wa.innerHTML=winLine(winEigen(r),r.priceA);
+ var wb=document.getElementById("wb"+i);if(wb)wb.innerHTML=winLine(winDrop(r),r.priceB);
+ var wn=document.getElementById("wnow"+i);if(wn){var v=winNow(r);wn.className="val "+(v==null?"mut":(v>=0?"pos":"neg"));wn.textContent=(v==null?"\\u2014":("\\u20ac"+v.toFixed(2)));}
+}
 function winst(r){
  var cost=num2(r.cost); if(cost==null) return '<span class="hint">vul inkoop in</span>';
  var A=num2(r.priceA), B=num2(r.priceB); var out=[];
