@@ -4,7 +4,8 @@
   "private": true,
   "description": "PadeLMQ voorraad- & locatie-gestuurde prijzen",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/"
   },
   "engines": {
     "node": ">=18"
