@@ -42,7 +42,20 @@ const MF = {
   tiendaPrice: "tienda_price",          // dagelijks opgehaalde webshopprijs van Tienda Padelpoint (incl btw, uitgelogd)
   tiendaAt: "tienda_at",                // tijdstip laatste geslaagde Tienda-ophaling (ISO)
   locked: "locked", state: "state", euState: "eu_state", log: "log",
+  // "Spanje eerst, ook bij Belgische voorraad" (GO Mathias 13-11 en 15-11-2026).
+  // Menselijk veld: "true" = Spanje heeft voorrang op BE/NL zolang Spanje genoeg heeft.
+  // Ontbreekt het veld, dan is het UIT en geldt de bestaande werking ongewijzigd.
+  spainFirst: "spain_first",
+  // Berekend door de ronde (nooit door een mens): waarom deze route, en hoeveel
+  // dozen Spanje vandaag hoogstens in één bestelling kan leveren (afgekapt op ES_QTY_CAP).
+  // Het thema leest beide om prijs, termijn en een te grote hoeveelheid eerlijk te tonen.
+  routeReason: "route_reason", esQty: "es_qty",
 };
+// Vanaf hoeveel Spaanse dozen "Spanje eerst" de BE/NL-route op Spanje zet. Standaard 1:
+// letterlijk "Spanje heeft voorraad". Hoger zetten (bv. 4) voorkomt dat een klant die
+// meer dozen bestelt dan Spanje heeft, op Spaanse prijs in de mand zit (zie rapport S).
+const SPAIN_FIRST_MIN_ES = Math.max(1, parseInt(process.env.SPAIN_FIRST_MIN_ES || "1", 10) || 1);
+const ES_QTY_CAP = 10; // boven 10 maakt het voor de klant niets uit; afkappen spaart writes
 const DOOSTOESLAG = 9.95; // richtwaarde doostoeslag voor de all-in-berekening bij dropship
 
 // ---------- Tienda Padelpoint: dagelijkse webshopprijs ophalen ----------
@@ -226,6 +239,61 @@ function decideState(be, es) {
 }
 function num(v) { const n = parseFloat(String(v).replace(",", ".")); return isNaN(n) ? null : n; }
 
+// DE ROUTE VOOR BE/NL, met de reden erbij.
+//
+// Vinkje UIT: exact decideState() — de bestaande werking, ongewijzigd (BE wint zodra BE > 0).
+// Vinkje AAN ("Spanje eerst, ook bij Belgische voorraad"):
+//   Spanje >= minEs                -> stock-es (prijs B, profiel Ballendozen), reden spanje_eerst
+//   Spanje te weinig, BE > 0       -> stock-be (prijs A, profiel Algemeen),    reden spanje_te_weinig / spanje_leeg
+//   BE leeg, Spanje 1..minEs-1     -> stock-es, reden alleen_spanje (zoals vandaag)
+//   beide leeg                     -> stock-leeg (uitverkocht), reden beide_leeg
+// Spanje aangevuld -> de volgende ronde zet de route vanzelf terug op Spanje; het vinkje blijft staan.
+// De echte locatievoorraad wordt nergens aangeraakt: alleen prijs, profiel, tags en metafields.
+function decideRoute(be, es, spainFirst, minEs = SPAIN_FIRST_MIN_ES) {
+  if (!spainFirst) {
+    const state = decideState(be, es);
+    const reason = state === "stock-be" ? "belgie_voorraad" : state === "stock-es" ? "alleen_spanje" : "beide_leeg";
+    return { state, reason };
+  }
+  if (es >= minEs) return { state: "stock-es", reason: "spanje_eerst" };
+  if (be > 0) return { state: "stock-be", reason: es > 0 ? "spanje_te_weinig" : "spanje_leeg" };
+  if (es > 0) return { state: "stock-es", reason: "alleen_spanje" };
+  return { state: "stock-leeg", reason: "beide_leeg" };
+}
+const REDEN_TEKST = {
+  belgie_voorraad: "Belgische voorraad aanwezig: België gaat voor (vinkje Spanje eerst staat uit).",
+  alleen_spanje: "Alleen Spanje heeft voorraad.",
+  spanje_eerst: "Spanje eerst staat aan en Spanje heeft genoeg voorraad.",
+  spanje_te_weinig: "Spanje eerst staat aan, maar Spanje heeft te weinig: tijdelijk België. Keert vanzelf terug naar Spanje zodra Spanje aangevuld is.",
+  spanje_leeg: "Spanje eerst staat aan, maar Spanje is leeg: tijdelijk België. Keert vanzelf terug naar Spanje zodra Spanje aangevuld is.",
+  beide_leeg: "België en Spanje zijn allebei leeg: uitverkocht.",
+};
+// Het menselijke veld spain_first uit een POST-body: alleen als de sleutel er echt in staat.
+function spainFirstVeld(b) {
+  if (!b || !Object.prototype.hasOwnProperty.call(b, "spainFirst")) return {};
+  return { [MF.spainFirst]: b.spainFirst === true || b.spainFirst === "true" ? "true" : "false" };
+}
+// Hoeveel dozen Spanje in één bestelling kan leveren, afgekapt; negatief telt als 0.
+function esQtyLabel(es) { return String(Math.max(0, Math.min(ES_QTY_CAP, Math.floor(es || 0)))); }
+
+// WAT GEBEURT ER MET DEZE MAND? (pure functie, voor thema-uitleg, rapport en tests)
+// De variantprijs is per product één getal (Grow kent geen prijs per mand), dus de route
+// wordt vóór de mand gekozen. Bestelt de klant MEER dan Spanje heeft terwijl de route op
+// Spanje staat, dan gaat de hele bestelling in één zending uit België, aan de prijs die hij
+// zag (B) en met de ene verzendkost die hij zag: geen split, geen dubbele verzendkost, en
+// sneller dan beloofd. Kan geen van beide het volledige aantal, dan is dat aantal niet leverbaar.
+function mandRoute(route, qty, be, es) {
+  if (route === "stock-leeg") return { vertrek: null, prijs: null, leverbaar: false, reden: "uitverkocht" };
+  if (route === "stock-es") {
+    if (es >= qty) return { vertrek: "ES", prijs: "B", leverbaar: true, reden: "spanje_volledig" };
+    if (be >= qty) return { vertrek: "BE", prijs: "B", leverbaar: true, reden: "spanje_te_weinig_hele_mand_uit_belgie" };
+    return { vertrek: null, prijs: "B", leverbaar: false, reden: "geen_magazijn_volledig" };
+  }
+  if (be >= qty) return { vertrek: "BE", prijs: "A", leverbaar: true, reden: "belgie_volledig" };
+  if (es >= qty) return { vertrek: "ES", prijs: "A", leverbaar: true, reden: "belgie_te_weinig_hele_mand_uit_spanje" };
+  return { vertrek: null, prijs: "A", leverbaar: false, reden: "geen_magazijn_volledig" };
+}
+
 // Bepaal wat er buiten BE/NL (Europa) moet gebeuren.
 // - Spanje voorraad  -> koopbaar aan Prijs B (+ opslag)
 // - enkel BE-voorraad -> uitverkocht, TENZIJ eu_be_price is ingevuld (dan koopbaar aan die hogere prijs)
@@ -257,10 +325,13 @@ async function reconcileAll(onlyId = null) {
     const prevEu = cfg[MF.euState] || "";
     const be = availableAt(variant, LOCATIONS.belgium);
     const es = availableAt(variant, LOCATIONS.spain);
-    const target = decideState(be, es);
+    const spainFirst = cfg[MF.spainFirst] === "true";
+    const route = decideRoute(be, es, spainFirst);
+    const target = route.state;
     const eu = decideEuropa(be, es, priceB, cfg[MF.marketSurcharge], cfg[MF.euBePrice]);
     const euDesired = eu.on ? `on:${eu.price}` : "off";
-    const base = { title: p.title, be, es, from: prev || "(onbekend)", to: target, eu: euDesired, action: "", applied: false };
+    const base = { title: p.title, be, es, from: prev || "(onbekend)", to: target, eu: euDesired,
+      spainFirst, reason: route.reason, action: "", applied: false };
 
     if (!enabled) { results.push({ ...base, action: "overgeslagen (uit)" }); continue; }
     if (locked) { results.push({ ...base, action: "overgeslagen (vergrendeld)" }); continue; }
@@ -299,8 +370,20 @@ async function reconcileAll(onlyId = null) {
     const wantPrice = num(price);
     const priceDrift = wantPrice != null && curPrice != null && Math.abs(wantPrice - curPrice) >= 0.005;
     const beNlAction = beNlChanged || priceDrift; // toepassen bij wissel OF afwijking
+    // Alleen de uitleg (reden) of het Spaanse aantal voor het thema veranderde: dat is een
+    // metafield-update, geen prijs- of profielwrite.
+    const esQty = esQtyLabel(es);
+    const infoChanged = (cfg[MF.routeReason] || "") !== route.reason || (cfg[MF.esQty] || "") !== esQty;
 
-    if (!beNlAction && !euChanged) { results.push({ ...base, action: "geen wissel" }); continue; }
+    if (!beNlAction && !euChanged && !infoChanged) { results.push({ ...base, action: "geen wissel" }); continue; }
+    if (!beNlAction && !euChanged) {
+      if (!APPLY) { results.push({ ...base, action: "[DRY-RUN] alleen route-uitleg bijgewerkt" }); continue; }
+      try {
+        await setMeta(p.id, { [MF.routeReason]: route.reason, [MF.esQty]: esQty });
+        results.push({ ...base, action: "alleen route-uitleg bijgewerkt", applied: false });
+      } catch (err) { results.push({ ...base, action: "FOUT: " + err.message }); }
+      continue;
+    }
 
     const parts = [];
     if (beNlChanged) parts.push(target === "stock-leeg"
@@ -322,7 +405,8 @@ async function reconcileAll(onlyId = null) {
       }
       await setMeta(p.id, {
         [MF.state]: target, [MF.euState]: euDesired,
-        [MF.log]: `${new Date().toISOString()} ${prev || "?"}->${target} eu:${euDesired} BE=${be} ES=${es}`,
+        [MF.routeReason]: route.reason, [MF.esQty]: esQty,
+        [MF.log]: `${new Date().toISOString()} ${prev || "?"}->${target} eu:${euDesired} BE=${be} ES=${es}${spainFirst ? " spanje-eerst" : ""} reden:${route.reason}`,
       });
       results.push({ ...base, action, applied: true });
     } catch (err) { results.push({ ...base, action: "FOUT: " + err.message }); }
@@ -410,7 +494,16 @@ const server = http.createServer(async (req, res) => {
           cost: c[MF.cost] ?? "",
           tiendaPrice: c[MF.tiendaPrice] ?? "", tiendaAt: c[MF.tiendaAt] ?? "",
           hasTienda: Object.prototype.hasOwnProperty.call(TIENDA_URLS, p.id),
-          state: c[MF.state] ?? "", euState: c[MF.euState] ?? "" };
+          state: c[MF.state] ?? "", euState: c[MF.euState] ?? "",
+          // Spanje eerst: de keuze, de voorraad per kant, en welke route de regel NU kiest
+          // met de reden in gewone taal. `routeState` is live berekend uit de voorraad van
+          // dit moment; `state` is wat de laatste ronde in Shopify zette. Verschillen ze,
+          // dan zet de volgende ronde (of "Nu controleren") het recht.
+          spainFirst: c[MF.spainFirst] === "true",
+          be: availableAt(v, LOCATIONS.belgium), es: availableAt(v, LOCATIONS.spain),
+          ...(() => { const r = decideRoute(availableAt(v, LOCATIONS.belgium), availableAt(v, LOCATIONS.spain), c[MF.spainFirst] === "true");
+            return { routeState: r.state, routeReason: r.reason, routeText: REDEN_TEKST[r.reason] || "" }; })(),
+          spainFirstMinEs: SPAIN_FIRST_MIN_ES };
       });
       return send(res, 200, { ok: true, rows });
     }
@@ -426,7 +519,10 @@ const server = http.createServer(async (req, res) => {
             [MF.marketSurcharge]: b.marketSurcharge ?? "", [MF.euBePrice]: b.euBePrice ?? "",
             [MF.competitor]: b.competitor ?? "", [MF.competitorShip]: b.competitorShip ?? "",
             [MF.cost]: b.cost ?? "",
-            [MF.enabled]: b.enabled ? "true" : "false", [MF.locked]: b.locked ? "true" : "false" });
+            [MF.enabled]: b.enabled ? "true" : "false", [MF.locked]: b.locked ? "true" : "false",
+            // Spanje eerst: ALLEEN schrijven als de sleutel echt meekomt. Een oudere client
+            // (of een deeldocument) die het veld niet kent, mag het vinkje nooit stil uitzetten.
+            ...spainFirstVeld(b) });
           // Meteen toepassen in Shopify voor DIT product (prijs + profiel voor de huidige voorraadtoestand).
           let applied = 0, note = "";
           try {
@@ -466,7 +562,7 @@ const server = http.createServer(async (req, res) => {
   } catch (e) { send(res, 500, { ok: false, error: e.message }); }
 });
 
-server.listen(PORT, () => {
+if (require.main === module) server.listen(PORT, () => {
   console.log(`[stockprice] draait op poort ${PORT} — ${APPLY ? "LIVE" : "DRY-RUN"}`);
   if (INTERVAL_MIN && INTERVAL_MIN >= 1) {
     const run = async () => {
@@ -677,7 +773,9 @@ function renderBallen(rows){
     +'<div class="foot"><div class="toggles">'
      +'<label><input type="checkbox" '+(r.enabled?"checked":"")+' onchange="upd('+i+',\\'enabled\\',this.checked)"> App beheert deze doos</label>'
      +'<label><input type="checkbox" '+(r.locked?"checked":"")+' onchange="upd('+i+',\\'locked\\',this.checked)"> Vergrendeld (met rust laten)</label>'
+     +'<label><input type="checkbox" '+(r.spainFirst?"checked":"")+' onchange="upd('+i+',\\'spainFirst\\',this.checked)"> Spanje eerst, ook bij Belgische voorraad</label>'
     +'</div><button class="dark" id="sv'+i+'" onclick="save('+i+')">Opslaan</button></div>'
+    +(r.routeText?'<div class="hint" style="margin-top:8px">Route nu: '+r.routeText+' (BE '+r.be+' \\u00b7 ES '+r.es+')</div>':'')
    +'</div>'
   +'</div>';
  });
@@ -719,3 +817,6 @@ function renderMarkt(rows){
 }
 login();
 </script></body></html>`;
+
+// Voor de tests (node --test): de pure beslisregels, zonder server of Shopify.
+module.exports = { decideState, decideRoute, decideEuropa, mandRoute, esQtyLabel, spainFirstVeld, REDEN_TEKST, SPAIN_FIRST_MIN_ES, PAGE, reconcileAll, server };
