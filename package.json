@@ -5,7 +5,7 @@
   "description": "PadeLMQ voorraad- & locatie-gestuurde prijzen",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/"
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"
