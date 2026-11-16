@@ -88,12 +88,21 @@ test("elke reden heeft een tekst voor Master en het dashboard", () => {
   }
 });
 
-test("mand: 1 -> 2 dozen terwijl Spanje er 1 heeft = hele mand uit België, zelfde prijs B, geen split", () => {
-  assert.deepEqual(S.mandRoute("stock-es", 1, 6, 1), { vertrek: "ES", prijs: "B", leverbaar: true, reden: "spanje_volledig" });
-  assert.deepEqual(S.mandRoute("stock-es", 2, 6, 1), { vertrek: "BE", prijs: "B", leverbaar: true, reden: "spanje_te_weinig_hele_mand_uit_belgie" });
-  assert.equal(S.mandRoute("stock-es", 9, 6, 1).leverbaar, false);
-  assert.equal(S.mandRoute("stock-leeg", 1, 0, 0).leverbaar, false);
-  assert.deepEqual(S.mandRoute("stock-be", 2, 6, 0), { vertrek: "BE", prijs: "A", leverbaar: true, reden: "belgie_volledig" });
+// Vervangt de oude mandRoute-test, die "2 dozen bij ES=1/BE=6 = vertrek BE met prijs B" als
+// GOED vastlegde. De regel van Mathias vraagt daar België met prijs A en gratis verzending.
+// Met de standaarddrempel 1 doet de winkel dat NIET: dat is nu een benoemde afwijking.
+test("mand: 1 -> 2 dozen terwijl Spanje er 1 heeft: regel = België prijs A; winkel (drempel 1) = prijs B -> afwijking", () => {
+  assert.deepEqual(S.regelVoorMand(2, 6, 1, true), { prijs: "A", profiel: "algemeen", termijn: "BE", vertrek: "BE", leverbaar: true, regel: "spanje_te_weinig_belgie" });
+  const m1 = S.mandKlopt(1, 6, 1, true);
+  assert.equal(m1.klopt, true);
+  const m2 = S.mandKlopt(2, 6, 1, true);
+  assert.equal(m2.klopt, false);
+  assert.deepEqual(m2.afwijkingen, ["prijs", "verzending"]);
+  assert.equal(m2.winkel.prijs, "B");
+  assert.equal(m2.winkel.vertrek, "BE");
+  assert.equal(S.mandKloptTot(6, 1, true), 1);
+  assert.equal(S.mandKlopt(9, 6, 1, true).winkel.leverbaar, false);
+  assert.equal(S.mandKlopt(1, 0, 0, true).winkel.leverbaar, false);
 });
 
 test("es_qty voor het thema: afgekapt op 10, negatief = 0", () => {
