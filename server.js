@@ -61,6 +61,15 @@ const MF = {
 // ook de klant van 1 doos België (prijs A, gratis) terwijl de regel Spanje vraagt.
 // Zie mandKlopt()/mandKloptTot() en test/mandHoeveelheid.test.js.
 const SPAIN_FIRST_MIN_ES = Math.max(1, parseInt(process.env.SPAIN_FIRST_MIN_ES || "1", 10) || 1);
+// HOE "Spanje eerst" werkt bij Belgische voorraad. Standaard "route" = de bestaande werking
+// (33e2a82): Spanje >= minEs -> route Spanje (prijs B, profiel Ballendozen) voor ELKE hoeveelheid.
+// "korting" (alleen met de exacte waarde; alles anders is "route"): een aangevinkte doos met BE > 0
+// blijft op route België (prijs A, profiel Algemeen) met reden `spanje_eerst_korting`, en de
+// Discount Function `padelmq-ballendoos-spanje` in de app PadeLMQ Master Discounts geeft in de mand
+// prijs B + doostoeslag zolang het aantal <= es_qty. Zonder die Function (of zonder de korting)
+// betaalt de klant dan gewoon prijs A, gratis: nooit meer dan vandaag, wel soms minder Spanje.
+// Live zetten (Railway-variabele) vraagt een GO, en pas NA de app-release en de korting.
+const SPAIN_FIRST_MODE = process.env.SPAIN_FIRST_MODE === "korting" ? "korting" : "route";
 const ES_QTY_CAP = 10; // boven 10 maakt het voor de klant niets uit; afkappen spaart writes
 const DOOSTOESLAG = 9.95; // richtwaarde doostoeslag voor de all-in-berekening bij dropship
 
@@ -255,7 +264,15 @@ function num(v) { const n = parseFloat(String(v).replace(",", ".")); return isNa
 //   beide leeg                     -> stock-leeg (uitverkocht), reden beide_leeg
 // Spanje aangevuld -> de volgende ronde zet de route vanzelf terug op Spanje; het vinkje blijft staan.
 // De echte locatievoorraad wordt nergens aangeraakt: alleen prijs, profiel, tags en metafields.
-function decideRoute(be, es, spainFirst, minEs = SPAIN_FIRST_MIN_ES) {
+function decideRoute(be, es, spainFirst, minEs = SPAIN_FIRST_MIN_ES, modus = SPAIN_FIRST_MODE) {
+  if (spainFirst && modus === "korting") {
+    // Modus korting: België blijft de productroute zolang België voorraad heeft; de mand krijgt
+    // de Spaanse prijs via de Discount Function (q <= es_qty). minEs speelt hier geen rol: de
+    // Function toetst per bestelling het echte aantal tegen es_qty.
+    if (be > 0) return { state: "stock-be", reason: es > 0 ? "spanje_eerst_korting" : "spanje_leeg" };
+    if (es > 0) return { state: "stock-es", reason: "alleen_spanje" };
+    return { state: "stock-leeg", reason: "beide_leeg" };
+  }
   if (!spainFirst) {
     const state = decideState(be, es);
     const reason = state === "stock-be" ? "belgie_voorraad" : state === "stock-es" ? "alleen_spanje" : "beide_leeg";
@@ -273,6 +290,7 @@ const REDEN_TEKST = {
   spanje_te_weinig: "Spanje eerst staat aan, maar Spanje heeft te weinig: tijdelijk België. Keert vanzelf terug naar Spanje zodra Spanje aangevuld is.",
   spanje_leeg: "Spanje eerst staat aan, maar Spanje is leeg: tijdelijk België. Keert vanzelf terug naar Spanje zodra Spanje aangevuld is.",
   beide_leeg: "België en Spanje zijn allebei leeg: uitverkocht.",
+  spanje_eerst_korting: "Spanje eerst (modus korting): route België (prijs A, gratis); in de mand prijs B + doostoeslag zolang Spanje het aantal heeft.",
 };
 // Het menselijke veld spain_first uit een POST-body: alleen als de sleutel er echt in staat.
 function spainFirstVeld(b) {
@@ -318,20 +336,26 @@ function regelVoorMand(qty, be, es, spainFirst, minEs = SPAIN_FIRST_MIN_ES) {
 // "routing" = beide kunnen het en Shopify's orderrouting kiest (niet door deze dienst bepaald),
 // "split" = alleen samen. termijn: wat het thema-snippet pmq-ballendoos-magazijn (preview) belooft:
 // route Spanje en qty > Spanje -> de kortere Belgische termijn.
-function winkelVoorMand(route, qty, be, es) {
+// `reden` (optioneel): in modus korting geeft de Function bij reden spanje_eerst_korting en
+// qty <= es_qty (afgekapt op ES_QTY_CAP) prijs B + doostoeslag in de mand. De termijn blijft wat
+// het thema bij route België toont (BE) tot het thema die reden kent: dat is een eerlijke afwijking.
+function winkelVoorMand(route, qty, be, es, reden) {
   const b = Math.max(0, be || 0), e = Math.max(0, es || 0);
   if (route === "stock-leeg") return { prijs: null, profiel: null, termijn: null, vertrek: null, leverbaar: false };
   const vertrek = e >= qty && b >= qty ? "routing" : e >= qty ? "ES" : b >= qty ? "BE" : b + e >= qty ? "split" : null;
   const leverbaar = vertrek !== null;
+  if (route === "stock-be" && reden === "spanje_eerst_korting" && qty <= Math.min(e, ES_QTY_CAP))
+    return { prijs: "B", profiel: "ballendozen", via: "korting", termijn: "BE", vertrek, leverbaar };
   if (route === "stock-es") return { prijs: "B", profiel: "ballendozen", termijn: e >= qty ? "ES" : "BE", vertrek, leverbaar };
   return { prijs: "A", profiel: "algemeen", termijn: "BE", vertrek, leverbaar };
 }
 
 // Klopt de mand met de regel? Vergelijkt prijs, verzendprofiel (dus de toeslag) en leverbaarheid.
 // Het vertrekmagazijn telt apart: "routing" is geen fout van de regel, maar ook geen garantie.
-function mandKlopt(qty, be, es, spainFirst, minEs = SPAIN_FIRST_MIN_ES) {
-  const route = decideRoute(be, es, spainFirst, minEs).state;
-  const winkel = winkelVoorMand(route, qty, be, es);
+function mandKlopt(qty, be, es, spainFirst, minEs = SPAIN_FIRST_MIN_ES, modus = SPAIN_FIRST_MODE) {
+  const beslist = decideRoute(be, es, spainFirst, minEs, modus);
+  const route = beslist.state;
+  const winkel = winkelVoorMand(route, qty, be, es, beslist.reason);
   const regel = regelVoorMand(qty, be, es, spainFirst, minEs);
   const afwijkingen = [];
   if (winkel.leverbaar !== regel.leverbaar) afwijkingen.push("leverbaarheid");
@@ -346,10 +370,10 @@ function mandKlopt(qty, be, es, spainFirst, minEs = SPAIN_FIRST_MIN_ES) {
 
 // Tot hoeveel dozen in één bestelling is de mand leverbaar EN volgens de regel?
 // Afgekapt op ES_QTY_CAP. 0 = al bij 1 doos niet (of uitverkocht: zie de route).
-function mandKloptTot(be, es, spainFirst, minEs = SPAIN_FIRST_MIN_ES) {
+function mandKloptTot(be, es, spainFirst, minEs = SPAIN_FIRST_MIN_ES, modus = SPAIN_FIRST_MODE) {
   let n = 0;
   while (n < ES_QTY_CAP) {
-    const m = mandKlopt(n + 1, be, es, spainFirst, minEs);
+    const m = mandKlopt(n + 1, be, es, spainFirst, minEs, modus);
     if (!m.klopt || !m.regel.leverbaar) break;
     n++;
   }
@@ -568,7 +592,7 @@ const server = http.createServer(async (req, res) => {
           // Tot hoeveel dozen in een bestelling klopt de mand met de regel (prijs, verzending,
           // termijn)? Alleen lezen; daarboven betaalt de klant wat de route op het product zet.
           mandKloptTot: mandKloptTot(availableAt(v, LOCATIONS.belgium), availableAt(v, LOCATIONS.spain), c[MF.spainFirst] === "true"),
-          spainFirstMinEs: SPAIN_FIRST_MIN_ES };
+          spainFirstMinEs: SPAIN_FIRST_MIN_ES, spainFirstMode: SPAIN_FIRST_MODE };
       });
       return send(res, 200, { ok: true, rows });
     }
@@ -885,4 +909,4 @@ login();
 </script></body></html>`;
 
 // Voor de tests (node --test): de pure beslisregels, zonder server of Shopify.
-module.exports = { decideState, decideRoute, decideEuropa, regelVoorMand, winkelVoorMand, mandKlopt, mandKloptTot, esQtyLabel, spainFirstVeld, REDEN_TEKST, SPAIN_FIRST_MIN_ES, PAGE, reconcileAll, server };
+module.exports = { decideState, decideRoute, decideEuropa, regelVoorMand, winkelVoorMand, mandKlopt, mandKloptTot, esQtyLabel, spainFirstVeld, REDEN_TEKST, SPAIN_FIRST_MIN_ES, SPAIN_FIRST_MODE, PAGE, reconcileAll, server };
